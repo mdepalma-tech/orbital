@@ -13,7 +13,7 @@ export function SidePanel({ selectedId, onClose }: SidePanelProps) {
 
   return (
     <div
-      className={`absolute top-0 right-0 h-full w-80 z-30 transition-transform duration-500 ease-out ${
+      className={`absolute top-0 right-0 h-full w-80 z-[16777280] transition-transform duration-500 ease-out ${
         isOpen ? "translate-x-0" : "translate-x-full"
       }`}
     >
