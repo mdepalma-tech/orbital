@@ -103,12 +103,12 @@ export function OrbitalNode({
 
       meshRef.current.position.copy(pos);
     } else {
-      const orbitalPos = getOrbitalPosition(variable, orbitalTimeRef.current, _orbitalOut);
-
       if (phase === "activating") {
+        const orbitalPos = getOrbitalPosition(variable, orbitalTimeRef.current, _orbitalOut);
         meshRef.current.position.lerp(orbitalPos, delta * 1.8);
         chaosPos.current.copy(meshRef.current.position);
       } else {
+        const orbitalPos = getOrbitalPosition(variable, orbitalTimeRef.current, _orbitalOut);
         meshRef.current.position.copy(orbitalPos);
       }
     }
@@ -163,24 +163,12 @@ export function OrbitalNode({
       />
       <Html
         distanceFactor={12}
-        style={{
-          pointerEvents: "none",
-          userSelect: "none",
-        }}
+        style={{ pointerEvents: "none", userSelect: "none" }}
       >
         <div style={{ transform: "translateY(-24px)" }} className="flex flex-col items-center">
-          <div
-            className="text-[10px] font-light tracking-wider text-white/60 px-1.5 py-0.5 rounded bg-black/40 backdrop-blur-sm whitespace-nowrap"
-          >
+          <div className="text-[11px] font-light tracking-wider text-white/60 px-1.5 py-0.5 rounded bg-black/40 backdrop-blur-sm whitespace-nowrap">
             {variable.label}
           </div>
-          {isSelected && (
-            <div
-              className="mt-1.5 w-48 text-[9px] font-light text-gray-400 leading-relaxed px-2.5 py-2 rounded-md bg-black/70 backdrop-blur-md border border-white/10"
-            >
-              {variable.description}
-            </div>
-          )}
         </div>
       </Html>
     </mesh>
