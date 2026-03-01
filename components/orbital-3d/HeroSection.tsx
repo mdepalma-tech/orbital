@@ -6,6 +6,7 @@ import { Canvas } from "@react-three/fiber";
 import { PerspectiveCamera } from "@react-three/drei";
 import { SceneController } from "./SceneController";
 import { SidePanel } from "./SidePanel";
+import { TypingSubtitle } from "./TypingSubtitle";
 
 type Phase = "chaos" | "activating" | "orbital";
 
@@ -47,17 +48,6 @@ export function HeroSection() {
     <section className="relative z-10 flex flex-col items-center px-6 -mt-2">
       {/* Top: Headline */}
       <div className="text-center">
-        {phase === "chaos" && (
-          <p className="text-xs uppercase tracking-[0.25em] text-gray-500 mb-3 font-light">
-            Your growth data is fragmented.
-          </p>
-        )}
-        {phase === "orbital" && (
-          <p className="text-xs uppercase tracking-[0.25em] text-emerald-400/70 mb-3 font-light">
-            Structure revealed.
-          </p>
-        )}
-
         <h1 className="text-4xl md:text-5xl lg:text-6xl font-light tracking-tight mb-2 leading-[1.1]">
           See What Actually Moves
           <br />
@@ -66,20 +56,24 @@ export function HeroSection() {
           </span>
         </h1>
 
-        {phase === "chaos" && (
-          <p className="text-xs text-white font-light tracking-wide animate-pulse">
-            Click to turn on Orbital
-          </p>
-        )}
-        {phase === "orbital" && (
-          <p className="text-xs text-white font-light tracking-wide">
-            Click any variable to explore
-          </p>
-        )}
+        <TypingSubtitle phase={phase} />
+
+        <div className="min-h-[1.5rem] flex items-center justify-center">
+          {phase === "chaos" && (
+            <p className="text-xs text-white font-light tracking-wide animate-pulse">
+              Click to turn on Orbital
+            </p>
+          )}
+          {(phase === "activating" || phase === "orbital") && (
+            <p className="text-xs text-white font-light tracking-wide">
+              Click any variable to explore
+            </p>
+          )}
+        </div>
       </div>
 
       {/* Middle: 3D Animation */}
-      <div className="w-screen h-[65vh] lg:h-[82vh] relative -my-8 lg:-my-14 flex-shrink-0">
+      <div className="w-screen h-[65vh] lg:h-[82vh] relative -mt-12 -mb-8 lg:-mt-20 lg:-mb-14 flex-shrink-0">
         <Canvas
           dpr={[1, 2]}
           onPointerMissed={handlePointerMissed}
