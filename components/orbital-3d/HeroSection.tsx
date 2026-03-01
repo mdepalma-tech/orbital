@@ -1,5 +1,6 @@
 "use client";
 
+import "@/components/orbital-3d/r3f-extend";
 import { useState, useCallback, useEffect } from "react";
 import { Canvas } from "@react-three/fiber";
 import { PerspectiveCamera } from "@react-three/drei";
@@ -66,12 +67,12 @@ export function HeroSection() {
         </h1>
 
         {phase === "chaos" && (
-          <p className="text-xs text-gray-500 font-light tracking-wide animate-pulse">
+          <p className="text-xs text-white font-light tracking-wide animate-pulse">
             Click to turn on Orbital
           </p>
         )}
         {phase === "orbital" && (
-          <p className="text-xs text-gray-500 font-light tracking-wide">
+          <p className="text-xs text-white font-light tracking-wide">
             Click any variable to explore
           </p>
         )}

@@ -121,6 +121,7 @@ export function GoogleAdsUploadSection({ projectId }: { projectId: string }) {
 
   const hasWarnings = warnings.length > 0;
   const canSave = !!summary;
+  const showParseButton: boolean = stage === "upload" || stage === "error";
 
   return (
     <div className="space-y-4">
@@ -166,7 +167,7 @@ export function GoogleAdsUploadSection({ projectId }: { projectId: string }) {
           </label>
         </div>
 
-        {(stage === "upload" || stage === "error") && (
+        {showParseButton && (
           <button
             type="submit"
             disabled={!selectedFile || stage === "parsing"}

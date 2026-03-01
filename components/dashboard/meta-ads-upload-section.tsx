@@ -107,6 +107,8 @@ export function MetaAdsUploadSection({ projectId }: { projectId: string }) {
   }
 
   const canSave = !!summary;
+  const showParseButton: boolean =
+    stage === "upload" || stage === "error";
 
   return (
     <div className="space-y-4">
@@ -133,7 +135,7 @@ export function MetaAdsUploadSection({ projectId }: { projectId: string }) {
           </label>
         </div>
 
-        {(stage === "upload" || stage === "error") && (
+        {showParseButton && (
           <button
             type="submit"
             disabled={!selectedFile || stage === "parsing"}
