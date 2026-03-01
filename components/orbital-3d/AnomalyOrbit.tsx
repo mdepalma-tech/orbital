@@ -177,16 +177,16 @@ export function AnomalyOrbit() {
 
   return (
     <group>
-      <line geometry={expectedGeo}>
+      <threeLine geometry={expectedGeo}>
         <lineBasicMaterial
           color="#6366f1"
           transparent
           opacity={0.2}
           depthWrite={false}
         />
-      </line>
+      </threeLine>
 
-      <line geometry={trailGeo}>
+      <threeLine geometry={trailGeo}>
         <lineBasicMaterial
           ref={trailMatRef}
           color="#ef4444"
@@ -194,7 +194,7 @@ export function AnomalyOrbit() {
           opacity={0}
           depthWrite={false}
         />
-      </line>
+      </threeLine>
 
       <mesh ref={ghostRef}>
         <sphereGeometry args={[0.09, 16, 16]} />

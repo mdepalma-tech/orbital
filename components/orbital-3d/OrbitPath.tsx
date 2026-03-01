@@ -80,7 +80,7 @@ export function OrbitPath({ group, phase, isHighlighted }: OrbitPathProps) {
   });
 
   return (
-    <line geometry={geometry}>
+    <threeLine geometry={geometry}>
       <lineBasicMaterial
         ref={materialRef}
         color={isHighlighted ? "#818cf8" : "#a5b4fc"}
@@ -88,6 +88,6 @@ export function OrbitPath({ group, phase, isHighlighted }: OrbitPathProps) {
         opacity={0}
         depthWrite={false}
       />
-    </line>
+    </threeLine>
   );
 }

@@ -1,5 +1,6 @@
 "use client";
 
+import "@/components/orbital-3d/r3f-extend";
 import { useRef, useState, useEffect } from "react";
 import { Canvas } from "@react-three/fiber";
 import { PerspectiveCamera } from "@react-three/drei";

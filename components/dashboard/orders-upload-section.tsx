@@ -109,6 +109,8 @@ export function OrdersUploadSection({ projectId }: { projectId: string }) {
 
   const hasValidationWarnings = warnings && warnings.length > 0;
   const canSave = summary && !hasValidationWarnings;
+  const showParseButton: boolean =
+    stage === "upload" || stage === "error";
 
   return (
     <div className="space-y-4">
@@ -166,7 +168,7 @@ export function OrdersUploadSection({ projectId }: { projectId: string }) {
         </div>
 
         {/* Parse Button (only visible in upload stage) */}
-        {(stage === "upload" || stage === "error") && (
+        {showParseButton && (
           <button
             type="submit"
             disabled={!selectedFile || stage === "parsing"}
