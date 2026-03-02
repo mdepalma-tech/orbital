@@ -64,12 +64,12 @@ function buildDiagnosticsExplanation(metrics: Record<string, unknown>): string {
   let msg = `Your data scored **${score}/100** — Data Confidence Band: **${band}**.\n\n`;
   msg += `The engine selected **${modeName}**\n\n`;
 
-  if (snapshot) {
+  if (snapshot && typeof snapshot === "object") {
     msg += `Here's what I looked at:\n`;
-    msg += `- **${snapshot.n_obs}** weekly observations\n`;
-    msg += `- Spend variability (CV): **${snapshot.cv_spend_total}**\n`;
-    msg += `- Signal-to-noise ratio: **${snapshot.snr}**\n`;
-    msg += `- Max channel correlation: **${snapshot.max_pairwise_corr}**\n\n`;
+    msg += `- **${snapshot.n_obs ?? "—"}** weekly observations\n`;
+    msg += `- Spend variability (CV): **${snapshot.cv_spend_total ?? "—"}**\n`;
+    msg += `- Signal-to-noise ratio: **${snapshot.snr ?? "—"}**\n`;
+    msg += `- Max channel correlation: **${snapshot.max_pairwise_corr ?? "—"}**\n\n`;
   }
 
   if (reasons && reasons.length > 0) {
@@ -166,7 +166,8 @@ function RunPageInner() {
     );
 
     es.onmessage = (e) => {
-      const data: PipelineEvent = JSON.parse(e.data);
+      const raw = String(e.data).replace(/: (NaN|-?Infinity)/g, ": null");
+      const data: PipelineEvent = JSON.parse(raw);
 
       switch (data.type) {
         case "step":
@@ -195,18 +196,22 @@ function RunPageInner() {
           setResults((prev) => [...prev, data as ResultEvent]);
 
           if (data.id === "diagnostics" && !diagnosticsSentRef.current) {
-            diagnosticsSentRef.current = true;
-            const explanation = buildDiagnosticsExplanation(
-              (data as ResultEvent).metrics
-            );
-            setChatMessages((prev) => [
-              ...prev,
-              {
-                id: `diag-${Date.now()}`,
-                role: "assistant",
-                content: explanation,
-              },
-            ]);
+            try {
+              diagnosticsSentRef.current = true;
+              const explanation = buildDiagnosticsExplanation(
+                (data as ResultEvent).metrics
+              );
+              setChatMessages((prev) => [
+                ...prev,
+                {
+                  id: `diag-${Date.now()}`,
+                  role: "assistant",
+                  content: explanation,
+                },
+              ]);
+            } catch (_err) {
+              diagnosticsSentRef.current = true;
+            }
           }
           break;
 
@@ -551,7 +556,7 @@ function RunPageInner() {
                   {/* Metrics - collapsible */}
                   {!isCollapsed && (
                   <div className="px-4 pb-4 pt-0 space-y-1.5">
-                    {Object.entries(r.metrics).map(([key, value]) => {
+                    {Object.entries(r.metrics ?? {}).map(([key, value]) => {
                       if (key === "top_anomalies" && Array.isArray(value)) {
                         if (value.length === 0) return null;
                         return (

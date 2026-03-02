@@ -56,18 +56,19 @@ def validate_and_prepare(
     if not spend.empty:
         spend["ts"] = _normalize_date(spend["ts"])
 
-        # Guard: log if spend starts later than timeseries
+        # Guard: log if spend starts later than timeseries (skip 1-day gaps, often timezone noise)
         spend_min = spend["ts"].min()
         if spend_min > date_min:
             gap_days = (spend_min - date_min).days
-            logger.warning(
-                "Spend data starts %d day(s) after timeseries "
-                "(%s vs %s). Early period will have spend=0, "
-                "which weakens coefficient estimates for those days.",
-                gap_days,
-                spend_min.date(),
-                date_min.date(),
-            )
+            if gap_days >= 2:
+                logger.warning(
+                    "Spend data starts %d day(s) after timeseries "
+                    "(%s vs %s). Early period will have spend=0, "
+                    "which weakens coefficient estimates for those days.",
+                    gap_days,
+                    spend_min.date(),
+                    date_min.date(),
+                )
 
         spend_indexed = spend.set_index("ts").reindex(full_dates)
         for col in SPEND_COLUMNS:

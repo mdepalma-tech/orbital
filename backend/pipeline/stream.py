@@ -3,7 +3,20 @@
 from __future__ import annotations
 
 import json
+import logging
+import math
 from typing import Dict, Generator
+
+logger = logging.getLogger(__name__)
+
+
+def _json_safe(val):
+    """Convert value to JSON-serializable form; replace NaN/Inf with None."""
+    if hasattr(val, "item"):
+        val = val.item()
+    if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+        return None
+    return val
 
 from pipeline.fetch import fetch_project_data
 from pipeline.validate import validate_and_prepare
@@ -89,13 +102,14 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
 
     n_obs = len(daily)
 
-    # Detect spend coverage gap for the result card
+    # Detect spend coverage gap for the result card (1-day gaps often timezone noise)
     spend_gap_days = 0
     if not spend.empty and n_ts > 0:
         ts_min = pd.to_datetime(timeseries["ts"]).min()
         sp_min = pd.to_datetime(spend["ts"]).min()
         if sp_min > ts_min:
-            spend_gap_days = (sp_min - ts_min).days
+            gap = (sp_min - ts_min).days
+            spend_gap_days = gap if gap >= 2 else 0
 
     validate_status = "warn" if spend_gap_days > 0 else "pass"
     validate_metrics: Dict = {
@@ -178,27 +192,27 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
 
     model_mode = diagnostics["model_mode"]
 
-    # Ensure all metrics are JSON-serializable (no numpy types)
-    def _to_native(val):
-        if hasattr(val, "item"):
-            return val.item()
-        return val
-
     diag_metrics = {
-        "score": _to_native(diagnostics["score"]),
+        "score": _json_safe(diagnostics["score"]),
         "model_mode": model_mode,
         "data_confidence_band": diagnostics["data_confidence_band"],
-        "snapshot": {k: _to_native(v) for k, v in diagnostics["snapshot"].items()},
+        "snapshot": {k: _json_safe(v) for k, v in diagnostics["snapshot"].items()},
         "gating_reasons": list(diagnostics["gating_reasons"]),
     }
 
-    yield _sse({
+    diag_result = {
         "type": "result",
         "id": "diagnostics",
         "title": "Data Diagnostics",
         "status": "pass" if model_mode == "causal_full" else "warn",
         "metrics": diag_metrics,
-    })
+    }
+    try:
+        logger.info("Yielding diagnostics result: id=%s score=%s", diag_result["id"], diag_metrics.get("score"))
+        yield _sse(diag_result)
+    except Exception as e:
+        logger.exception("Failed to serialize/send diagnostics result: %s", e)
+        raise
 
     # ── Step 3: Design matrix ────────────────────────────────────────────
     yield _sse({
