@@ -3,7 +3,20 @@
 from __future__ import annotations
 
 import json
+import logging
+import math
 from typing import Dict, Generator
+
+logger = logging.getLogger(__name__)
+
+
+def _json_safe(val):
+    """Convert value to JSON-serializable form; replace NaN/Inf with None."""
+    if hasattr(val, "item"):
+        val = val.item()
+    if isinstance(val, float) and (math.isnan(val) or math.isinf(val)):
+        return None
+    return val
 
 from pipeline.fetch import fetch_project_data
 from pipeline.validate import validate_and_prepare
@@ -89,13 +102,14 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
 
     n_obs = len(daily)
 
-    # Detect spend coverage gap for the result card
+    # Detect spend coverage gap for the result card (1-day gaps often timezone noise)
     spend_gap_days = 0
     if not spend.empty and n_ts > 0:
         ts_min = pd.to_datetime(timeseries["ts"]).min()
         sp_min = pd.to_datetime(spend["ts"]).min()
         if sp_min > ts_min:
-            spend_gap_days = (sp_min - ts_min).days
+            gap = (sp_min - ts_min).days
+            spend_gap_days = gap if gap >= 2 else 0
 
     validate_status = "warn" if spend_gap_days > 0 else "pass"
     validate_metrics: Dict = {
@@ -135,6 +149,15 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
     df_weekly = aggregate_to_weekly(daily, spend_cols)
     n_obs = len(df_weekly)
 
+    if n_obs == 0:
+        yield _sse({
+            "type": "error",
+            "id": "aggregate",
+            "message": "No weekly observations after aggregation. Need at least one complete week of revenue and spend data.",
+        })
+        return
+
+    week_range = f"{df_weekly['week_start'].iloc[0].date()} to {df_weekly['week_start'].iloc[-1].date()}"
     yield _sse({
         "type": "result",
         "id": "aggregate",
@@ -143,7 +166,7 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
         "metrics": {
             "daily_rows": len(daily),
             "weekly_rows": n_obs,
-            "week_range": f"{df_weekly['week_start'].iloc[0].date()} to {df_weekly['week_start'].iloc[-1].date()}",
+            "week_range": week_range,
         },
     })
 
@@ -161,22 +184,35 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
         ),
     })
 
-    diagnostics = run_diagnostics(df_weekly, spend_cols)
+    try:
+        diagnostics = run_diagnostics(df_weekly, spend_cols)
+    except Exception as e:
+        yield _sse({"type": "error", "id": "diagnostics", "message": str(e)})
+        return
+
     model_mode = diagnostics["model_mode"]
 
-    yield _sse({
+    diag_metrics = {
+        "score": _json_safe(diagnostics["score"]),
+        "model_mode": model_mode,
+        "data_confidence_band": diagnostics["data_confidence_band"],
+        "snapshot": {k: _json_safe(v) for k, v in diagnostics["snapshot"].items()},
+        "gating_reasons": list(diagnostics["gating_reasons"]),
+    }
+
+    diag_result = {
         "type": "result",
         "id": "diagnostics",
         "title": "Data Diagnostics",
         "status": "pass" if model_mode == "causal_full" else "warn",
-        "metrics": {
-            "score": diagnostics["score"],
-            "model_mode": model_mode,
-            "data_confidence_band": diagnostics["data_confidence_band"],
-            "snapshot": diagnostics["snapshot"],
-            "gating_reasons": diagnostics["gating_reasons"],
-        },
-    })
+        "metrics": diag_metrics,
+    }
+    try:
+        logger.info("Yielding diagnostics result: id=%s score=%s", diag_result["id"], diag_metrics.get("score"))
+        yield _sse(diag_result)
+    except Exception as e:
+        logger.exception("Failed to serialize/send diagnostics result: %s", e)
+        raise
 
     # ── Step 3: Design matrix ────────────────────────────────────────────
     yield _sse({
