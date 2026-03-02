@@ -135,6 +135,15 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
     df_weekly = aggregate_to_weekly(daily, spend_cols)
     n_obs = len(df_weekly)
 
+    if n_obs == 0:
+        yield _sse({
+            "type": "error",
+            "id": "aggregate",
+            "message": "No weekly observations after aggregation. Need at least one complete week of revenue and spend data.",
+        })
+        return
+
+    week_range = f"{df_weekly['week_start'].iloc[0].date()} to {df_weekly['week_start'].iloc[-1].date()}"
     yield _sse({
         "type": "result",
         "id": "aggregate",
@@ -143,7 +152,7 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
         "metrics": {
             "daily_rows": len(daily),
             "weekly_rows": n_obs,
-            "week_range": f"{df_weekly['week_start'].iloc[0].date()} to {df_weekly['week_start'].iloc[-1].date()}",
+            "week_range": week_range,
         },
     })
 
@@ -161,21 +170,34 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
         ),
     })
 
-    diagnostics = run_diagnostics(df_weekly, spend_cols)
+    try:
+        diagnostics = run_diagnostics(df_weekly, spend_cols)
+    except Exception as e:
+        yield _sse({"type": "error", "id": "diagnostics", "message": str(e)})
+        return
+
     model_mode = diagnostics["model_mode"]
+
+    # Ensure all metrics are JSON-serializable (no numpy types)
+    def _to_native(val):
+        if hasattr(val, "item"):
+            return val.item()
+        return val
+
+    diag_metrics = {
+        "score": _to_native(diagnostics["score"]),
+        "model_mode": model_mode,
+        "data_confidence_band": diagnostics["data_confidence_band"],
+        "snapshot": {k: _to_native(v) for k, v in diagnostics["snapshot"].items()},
+        "gating_reasons": list(diagnostics["gating_reasons"]),
+    }
 
     yield _sse({
         "type": "result",
         "id": "diagnostics",
         "title": "Data Diagnostics",
         "status": "pass" if model_mode == "causal_full" else "warn",
-        "metrics": {
-            "score": diagnostics["score"],
-            "model_mode": model_mode,
-            "data_confidence_band": diagnostics["data_confidence_band"],
-            "snapshot": diagnostics["snapshot"],
-            "gating_reasons": diagnostics["gating_reasons"],
-        },
+        "metrics": diag_metrics,
     })
 
     # ── Step 3: Design matrix ────────────────────────────────────────────
