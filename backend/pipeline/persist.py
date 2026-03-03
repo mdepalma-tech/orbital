@@ -14,6 +14,17 @@ from services.supabase_client import get_supabase
 from pipeline.modeling import ModelResult
 
 
+def _to_native(val):
+    """Coerce numpy types to native Python for JSONB compatibility."""
+    if hasattr(val, "item"):
+        return val.item()
+    if isinstance(val, dict):
+        return {k: _to_native(v) for k, v in val.items()}
+    if isinstance(val, (list, tuple)):
+        return [_to_native(v) for v in val]
+    return val
+
+
 def _correlation_matrix(X, spend_cols: list[str]) -> dict:
     cols = [c for c in spend_cols if c in X.columns]
     if not cols:
@@ -38,6 +49,7 @@ def persist_results(
     model_config: Dict | None = None,
     config_hash: str | None = None,
     oos_metrics: Dict | None = None,
+    feature_state: Dict | None = None,
 ) -> str:
     logger.info("persist_results called for project_id=%s", project_id)
     sb = get_supabase()
@@ -81,6 +93,8 @@ def persist_results(
         version_row["config_hash"] = config_hash
     if model_config is not None:
         version_row["model_config"] = json.dumps(model_config)
+    if feature_state is not None:
+        version_row["feature_state"] = _to_native(feature_state)
 
     if diagnostics:
         version_row["data_strength_score"] = diagnostics["score"]
