@@ -1,12 +1,18 @@
 """Step 2.5 — Deterministic data diagnostics to select modeling track."""
 
+from __future__ import annotations
+
 from typing import Dict, List
 
 import numpy as np
 import pandas as pd
 
 
-def run_diagnostics(df_weekly: pd.DataFrame, spend_cols: List[str]) -> Dict:
+def run_diagnostics(
+    df_weekly: pd.DataFrame,
+    spend_cols: List[str],
+    dropped_weekly_constant: List[str] | None = None,
+) -> Dict:
     """
     Computes deterministic diagnostics used to select modeling track.
 
@@ -71,7 +77,7 @@ def run_diagnostics(df_weekly: pd.DataFrame, spend_cols: List[str]) -> Dict:
         snr = 0.0
 
     # Pairwise correlation (kept for explainability; not used for scoring)
-    max_corr = 0
+    max_corr = 0.0
     if len(spend_cols) > 1:
         corr = df_weekly[spend_cols].corr().abs()
         upper = corr.where(np.triu(np.ones(corr.shape), k=1).astype(bool))
@@ -112,7 +118,11 @@ def run_diagnostics(df_weekly: pd.DataFrame, spend_cols: List[str]) -> Dict:
         reasons.append("Low active spend variability")
     if snr < 0.9:
         reasons.append("Low signal-to-noise")
-    
+    if dropped_weekly_constant:
+        reasons.append(
+            f"Removed weekly-constant spend channels: {', '.join(dropped_weekly_constant)}"
+        )
+
     if cv_active < 0.12:
         model_mode = "diagnostic_stabilized"
     elif score >= 70:
@@ -129,19 +139,23 @@ def run_diagnostics(df_weekly: pd.DataFrame, spend_cols: List[str]) -> Dict:
     else:
         data_confidence = "Low"
 
+    def _safe_round(x, decimals=4):
+        v = round(x, decimals)
+        return v if np.isfinite(v) else 0.0
+
     snapshot = {
         "n_obs": n_obs,
-        "cv_spend_total": round(cv_spend_total, 4),
-        "zero_share": round(zero_share, 4),
+        "cv_spend_total": _safe_round(cv_spend_total, 4),
+        "zero_share": _safe_round(zero_share, 4),
         "n_active_weeks": n_active_weeks,
-        "cv_active": round(cv_active, 4),
-        "snr": round(snr, 4),
-        "max_pairwise_corr": round(max_corr, 4),
-        "depth_score": round(depth_score, 2),
-        "coverage_score": round(coverage_score, 2),
-        "inactivity_score": round(inactivity_score, 2),
-        "cv_score": round(cv_score, 2),
-        "snr_score": round(snr_score, 2),
+        "cv_active": _safe_round(cv_active, 4),
+        "snr": _safe_round(snr, 4),
+        "max_pairwise_corr": _safe_round(max_corr, 4),
+        "depth_score": _safe_round(depth_score, 2),
+        "coverage_score": _safe_round(coverage_score, 2),
+        "inactivity_score": _safe_round(inactivity_score, 2),
+        "cv_score": _safe_round(cv_score, 2),
+        "snr_score": _safe_round(snr_score, 2),
     }
 
     return {
