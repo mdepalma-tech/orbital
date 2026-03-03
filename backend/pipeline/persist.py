@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from typing import Dict, List
+
+logger = logging.getLogger(__name__)
 
 import numpy as np
 from services.supabase_client import get_supabase
@@ -34,7 +37,9 @@ def persist_results(
     diagnostics: Dict | None = None,
     model_config: Dict | None = None,
     config_hash: str | None = None,
+    oos_metrics: Dict | None = None,
 ) -> str:
+    logger.info("persist_results called for project_id=%s", project_id)
     sb = get_supabase()
 
     # ── models ───────────────────────────────────────────────────────────
@@ -83,6 +88,28 @@ def persist_results(
         version_row["confidence_band"] = diagnostics["data_confidence_band"]
         version_row["diagnostics_snapshot"] = json.dumps(diagnostics["snapshot"])
         version_row["gating_reasons"] = json.dumps(diagnostics["gating_reasons"])
+
+    if oos_metrics is not None:
+        # Coerce to native Python types for JSON/PostgREST compatibility
+        oos_n = oos_metrics.get("oos_n_obs")
+        version_row["oos_n_obs"] = int(oos_n) if oos_n is not None else None
+        oos_r2 = oos_metrics.get("oos_r2")
+        version_row["oos_r2"] = round(float(oos_r2), 6) if oos_r2 is not None else None
+        oos_rmse = oos_metrics.get("oos_rmse")
+        version_row["oos_rmse"] = round(float(oos_rmse), 6) if oos_rmse is not None else None
+        oos_mae = oos_metrics.get("oos_mae")
+        version_row["oos_mae"] = round(float(oos_mae), 6) if oos_mae is not None else None
+        oos_ratio = oos_metrics.get("oos_split_ratio")
+        version_row["oos_split_ratio"] = float(oos_ratio) if oos_ratio is not None else None
+        oos_mode = oos_metrics.get("oos_model_mode")
+        version_row["oos_model_mode"] = str(oos_mode) if oos_mode is not None else None
+        logger.info(
+            "Persisting OOS metrics: oos_n_obs=%s oos_r2=%s oos_rmse=%s oos_mae=%s",
+            version_row.get("oos_n_obs"),
+            version_row.get("oos_r2"),
+            version_row.get("oos_rmse"),
+            version_row.get("oos_mae"),
+        )
 
     sb.table("model_versions").insert(version_row).execute()
 

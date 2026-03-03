@@ -3,6 +3,8 @@
 import hashlib
 import json
 
+import numpy as np
+import pandas as pd
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
@@ -77,7 +79,79 @@ def run_pipeline(project_id: str):
 
     n_obs = len(df_weekly)
 
-    # Step 2.75 — Diagnostics
+    # --- Backtest split (80/20 time-based split) ---
+    split_idx = int(len(df_weekly) * 0.8)
+    df_train = df_weekly.iloc[:split_idx]
+    df_test = df_weekly.iloc[split_idx:]
+    n_oos = len(df_test)
+
+    # --- Backtest model (train only) ---
+    diagnostics_train = run_diagnostics(df_train, spend_cols)
+    model_mode_train = diagnostics_train["model_mode"]
+    X_train, y_train, feature_state = build_design_matrix(
+        df_train,
+        spend_cols,
+        model_mode=model_mode_train,
+    )
+    result_train = run_model(X_train, y_train, spend_cols)
+
+    # --- Build test matrix using same model_mode and feature_state ---
+    X_test, y_test, _ = build_design_matrix(
+        df_test,
+        spend_cols,
+        model_mode=model_mode_train,
+        feature_state=feature_state,
+    )
+    r2_oos = None
+    rmse_oos = None
+    mae_oos = None
+    if n_oos >= 8:
+        y_test_vals = y_test.values if hasattr(y_test, "values") else y_test
+
+        # Direct prediction if no lag terms were added during training
+        if getattr(result_train, "lags_added", 0) == 0:
+            if result_train.ridge_applied:
+                X_pred = X_test.drop(columns=["const"], errors="ignore")
+            else:
+                X_pred = X_test
+            y_pred_test = result_train.model.predict(X_pred)
+
+        else:
+            # Recursive prediction for lag models (lag_1 = y_{t-1}, lag_2 = y_{t-2})
+            lags_added = int(result_train.lags_added)
+
+            # Initialize history with *training actuals* (not predictions)
+            history = list(result_train.y.values)
+
+            y_pred_list = []
+            for i in range(len(X_test)):
+                row = X_test.iloc[i].copy()
+
+                if lags_added >= 1:
+                    row["lag_1"] = history[-1]
+                if lags_added >= 2:
+                    row["lag_2"] = history[-2]
+
+                row_df = pd.DataFrame([row])
+
+                if result_train.ridge_applied:
+                    row_df = row_df.drop(columns=["const"], errors="ignore")
+
+                y_hat = float(result_train.model.predict(row_df)[0])
+                y_pred_list.append(y_hat)
+
+                # Recursive: next step uses predicted value
+                history.append(y_hat)
+
+            y_pred_test = np.array(y_pred_list, dtype=float)
+
+        ss_res = float(np.sum((y_test_vals - y_pred_test) ** 2))
+        ss_tot = float(np.sum((y_test_vals - float(result_train.y.mean())) ** 2))
+        r2_oos = (1.0 - ss_res / ss_tot) if ss_tot > 0 else None
+        rmse_oos = float(np.sqrt(np.mean((y_test_vals - y_pred_test) ** 2)))
+        mae_oos = float(np.mean(np.abs(y_test_vals - y_pred_test)))
+
+    # Step 2.75 — Diagnostics (production: full data)
     diagnostics = run_diagnostics(
         df_weekly,
         spend_cols,
@@ -94,7 +168,7 @@ def run_pipeline(project_id: str):
     }
 
     # Step 3 — Build design matrix
-    X, y = build_design_matrix(
+    X, y, _ = build_design_matrix(
         df_weekly,
         spend_cols,
         model_mode=model_mode,
@@ -127,8 +201,20 @@ def run_pipeline(project_id: str):
     # Step 11 — Anomalies
     anomalies = detect_anomalies(result, df_weekly["week_start"])
 
+    # Build OOS metrics for confidence and persist
+    # Always include oos_n_obs, oos_split_ratio, oos_model_mode to distinguish
+    # "no OOS window" vs "OOS window too small to evaluate"
+    oos_metrics = {
+        "oos_n_obs": n_oos,
+        "oos_r2": r2_oos if n_oos >= 8 else None,
+        "oos_rmse": rmse_oos if n_oos >= 8 else None,
+        "oos_mae": mae_oos if n_oos >= 8 else None,
+        "oos_split_ratio": 0.8,
+        "oos_model_mode": model_mode_train,
+    }
+
     # Step 12 — Confidence
-    confidence = compute_confidence(result, n_obs)
+    confidence = compute_confidence(result, n_obs, oos_metrics=oos_metrics)
 
     # Step 13 — Persist
     try:
@@ -144,11 +230,18 @@ def run_pipeline(project_id: str):
             diagnostics=diagnostics,
             model_config=model_config_with_hash,
             config_hash=config_hash,
+            oos_metrics=oos_metrics,
         )
     except Exception as e:
         raise HTTPException(
             status_code=500, detail=f"Failed to persist results: {e}"
         )
+
+    # Temporary debug: OOS backtest metrics
+    print("OOS observations:", n_oos)
+    print("OOS R2:", r2_oos)
+    print("OOS RMSE:", rmse_oos)
+    print("OOS MAE:", mae_oos)
 
     # Step 14 — Response
     return RunModelResponse(

@@ -18,19 +18,23 @@ def get_model_config(model_mode: Optional[str]) -> Dict[str, Any]:
     return {"use_adstock": False, "adstock_alpha": None, "use_log": False}
 
 
-def geometric_adstock(series: pd.Series, alpha: float) -> pd.Series:
+def geometric_adstock(
+    series: pd.Series,
+    alpha: float,
+    init_value: float = 0.0,
+) -> tuple[pd.Series, float]:
     """
-    Forward recursion: A_t = Spend_t + alpha * A_{t-1}, with A_{-1} = 0.
-    Preserves index.
+    Forward recursion: A_t = Spend_t + alpha * A_{t-1}, with A_{-1} = init_value.
+    Preserves index. Returns (transformed series, final carryover value).
     """
     vals = series.values.astype(float)
     if len(vals) == 0:
-        return pd.Series(dtype=float, index=series.index)
+        return pd.Series(dtype=float, index=series.index), init_value
     out = np.empty(len(vals), dtype=float)
-    out[0] = vals[0]
+    out[0] = vals[0] + alpha * init_value
     for i in range(1, len(vals)):
         out[i] = vals[i] + alpha * out[i - 1]
-    return pd.Series(out, index=series.index)
+    return pd.Series(out, index=series.index), float(out[-1])
 
 
 def build_design_matrix(
@@ -38,7 +42,8 @@ def build_design_matrix(
     spend_cols: list[str],
     model_mode: Optional[str] = None,
     diagnostics: Optional[Dict[str, Any]] = None,
-) -> tuple[pd.DataFrame, pd.Series]:
+    feature_state: Optional[Dict[str, Any]] = None,
+) -> tuple[pd.DataFrame, pd.Series, Dict[str, Any]]:
     """
     Constructs from weekly-aggregated data:
       y = revenue
@@ -47,6 +52,7 @@ def build_design_matrix(
     Spend transformations (adstock, log) are applied conditionally per model_mode.
     Event dummy columns (event_*) are expected to already exist in df_weekly,
     applied at daily granularity and propagated through weekly aggregation.
+    feature_state enables train/test consistency for trend centering and adstock.
     """
     config = get_model_config(model_mode)
     X = pd.DataFrame(index=df_weekly.index)
@@ -54,9 +60,13 @@ def build_design_matrix(
     # Intercept
     X["const"] = 1.0
 
-    # Centered trend
+    # Centered trend (reuse trend_mean from feature_state for test consistency)
     trend = df_weekly["week_index"].astype(float)
-    X["trend"] = trend - trend.mean()
+    if feature_state and "trend_mean" in feature_state:
+        trend_mean = feature_state["trend_mean"]
+    else:
+        trend_mean = float(trend.mean())
+    X["trend"] = trend - trend_mean
 
     # Event columns (pre-baked into df_weekly by apply_event_dummies + aggregation)
     event_cols = [c for c in df_weekly.columns if c.startswith("event_")]
@@ -64,12 +74,25 @@ def build_design_matrix(
         X[col] = df_weekly[col].astype(float)
 
     # Spend columns: raw -> adstock (if enabled) -> log (if enabled)
+    adstock_last_values: Dict[str, float] = {}
     for col in spend_cols:
         raw = df_weekly[col].astype(float)
+
         if config["use_adstock"] and config["adstock_alpha"] is not None:
-            raw = geometric_adstock(raw, config["adstock_alpha"])
+            init_value = 0.0
+            if feature_state and "adstock_last" in feature_state:
+                init_value = feature_state["adstock_last"].get(col, 0.0)
+
+            raw, last_val = geometric_adstock(
+                raw,
+                config["adstock_alpha"],
+                init_value=init_value,
+            )
+            adstock_last_values[col] = last_val
+
         if config["use_log"]:
             raw = np.log1p(np.maximum(raw, 0.0))
+
         X[col] = raw
 
     y = df_weekly["revenue"].astype(float)
@@ -79,4 +102,10 @@ def build_design_matrix(
     assert X.isna().sum().sum() == 0, "Design matrix contains NaN"
     assert y.isna().sum() == 0, "Target vector contains NaN"
 
-    return X, y
+    new_feature_state: Dict[str, Any] = {
+        "trend_mean": trend_mean,
+    }
+    if config["use_adstock"]:
+        new_feature_state["adstock_last"] = adstock_last_values
+
+    return X, y, new_feature_state
