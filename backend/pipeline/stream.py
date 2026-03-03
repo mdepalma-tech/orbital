@@ -393,7 +393,7 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
         ),
     })
 
-    X, y, _ = build_design_matrix(
+    X, y, feature_state = build_design_matrix(
         df_weekly,
         spend_cols,
         model_mode=model_mode,
@@ -589,6 +589,7 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
         "lags_added": result.lags_added,
         "hac_applied": result.hac_applied,
         "log_transform_post_fit": result.log_transform_applied,
+        "feature_names": list(result.X.columns),
     })
     config_hash = hashlib.sha256(
         json.dumps(model_config, sort_keys=True).encode()
@@ -691,6 +692,14 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
         ),
     })
 
+    # For lag models: persist last N actuals for recursive forecast
+    feature_state_to_persist = dict(feature_state) if feature_state else {}
+    if result.lags_added > 0:
+        last_actuals = list(result.y.values)[-result.lags_added:]
+        feature_state_to_persist["lag_history"] = [
+            float(y) for y in last_actuals
+        ]
+
     try:
         persist_results(
             project_id=project_id,
@@ -705,6 +714,7 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
             model_config=model_config_with_hash,
             config_hash=config_hash,
             oos_metrics=oos_metrics,
+            feature_state=feature_state_to_persist,
         )
     except Exception as e:
         import traceback

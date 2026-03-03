@@ -20,8 +20,82 @@ from pipeline.anomalies import detect_anomalies
 from pipeline.confidence import compute_confidence
 from pipeline.persist import persist_results
 from pipeline.stream import stream_pipeline
+from pipeline.forecast import (
+    load_latest_model_version,
+    get_latest_weekly_row,
+    build_X_for_prediction,
+    predict_revenue,
+)
+
+from schemas.responses import ForecastRequest, ForecastResponse
 
 router = APIRouter()
+
+
+@router.post("/projects/{project_id}/forecast", response_model=ForecastResponse)
+def forecast(project_id: str, body: ForecastRequest):
+    """Version-driven forecast: loads model_version from DB, uses feature_state. No in-memory state from /run."""
+    try:
+        loaded = load_latest_model_version(
+            project_id, version_id=body.version_id
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    try:
+        last_week_index, baseline_spend = get_latest_weekly_row(
+            project_id, loaded.spend_cols
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    mult = body.spend_multiplier
+
+    if body.weeks and len(body.weeks) > 0:
+        df = pd.DataFrame([
+            {
+                "week_index": w.week_index,
+                "meta_spend": w.meta_spend,
+                "google_spend": w.google_spend,
+                "tiktok_spend": w.tiktok_spend,
+            }
+            for w in body.weeks
+        ])
+        for col in loaded.spend_cols:
+            if col not in df.columns:
+                df[col] = baseline_spend.get(col, 0.0) * mult
+    else:
+        df = pd.DataFrame([
+            {
+                "week_index": last_week_index + i,
+                **{col: baseline_spend.get(col, 0.0) * mult for col in loaded.spend_cols},
+            }
+            for i in range(1, body.horizon + 1)
+        ])
+
+    # Guarantee all spend_cols exist; never rely on build_X fallback to zero
+    for col in loaded.spend_cols:
+        if col not in df.columns:
+            df[col] = baseline_spend.get(col, 0.0) * mult
+
+    event_cols = [c for c in loaded.coefficients if c.startswith("event_")]
+    for col in event_cols:
+        df[col] = 0.0
+
+    if len(df) == 0:
+        return ForecastResponse(version_id=loaded.version_id, predictions=[])
+
+    X = build_X_for_prediction(
+        df,
+        loaded.spend_cols,
+        loaded.model_config,
+        loaded.feature_state,
+    )
+    preds = predict_revenue(loaded, X)
+    return ForecastResponse(
+        version_id=loaded.version_id,
+        predictions=[round(float(p), 2) for p in preds],
+    )
 
 
 @router.get("/projects/{project_id}/run/stream")
@@ -168,7 +242,7 @@ def run_pipeline(project_id: str):
     }
 
     # Step 3 — Build design matrix
-    X, y, _ = build_design_matrix(
+    X, y, feature_state = build_design_matrix(
         df_weekly,
         spend_cols,
         model_mode=model_mode,
@@ -185,6 +259,7 @@ def run_pipeline(project_id: str):
         "lags_added": result.lags_added,
         "hac_applied": result.hac_applied,
         "log_transform_post_fit": result.log_transform_applied,
+        "feature_names": list(result.X.columns),
     })
     config_hash = hashlib.sha256(
         json.dumps(model_config, sort_keys=True).encode()
@@ -216,6 +291,14 @@ def run_pipeline(project_id: str):
     # Step 12 — Confidence
     confidence = compute_confidence(result, n_obs, oos_metrics=oos_metrics)
 
+    # For lag models: persist last N actuals for recursive forecast
+    feature_state_to_persist = dict(feature_state) if feature_state else {}
+    if result.lags_added > 0:
+        last_actuals = list(result.y.values)[-result.lags_added:]
+        feature_state_to_persist["lag_history"] = [
+            float(y) for y in last_actuals
+        ]
+
     # Step 13 — Persist
     try:
         persist_results(
@@ -231,6 +314,7 @@ def run_pipeline(project_id: str):
             model_config=model_config_with_hash,
             config_hash=config_hash,
             oos_metrics=oos_metrics,
+            feature_state=feature_state_to_persist,
         )
     except Exception as e:
         raise HTTPException(
