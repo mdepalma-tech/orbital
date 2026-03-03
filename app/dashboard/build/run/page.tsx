@@ -546,6 +546,18 @@ function RunPageInner() {
                           <span className="text-gray-500">Adjusted R²</span>
                           <p className="text-white font-light">{(complete.summary.adjusted_r2 as number).toFixed(4)}</p>
                         </div>
+                        {complete.summary.oos_r2 != null && (
+                          <>
+                            <div>
+                              <span className="text-gray-500">OOS R²</span>
+                              <p className="text-cyan-400 font-light">{(complete.summary.oos_r2 as number).toFixed(4)}</p>
+                            </div>
+                            <div>
+                              <span className="text-gray-500">OOS RMSE</span>
+                              <p className="text-cyan-400 font-light">{(complete.summary.oos_rmse as number).toFixed(2)}</p>
+                            </div>
+                          </>
+                        )}
                       </div>
                       <div className="mt-4 pt-4 border-t border-white/10">
                         <button

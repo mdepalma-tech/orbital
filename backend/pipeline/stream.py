@@ -20,6 +20,7 @@ from pipeline.modeling import (
     check_autocorrelation,
     check_heteroskedasticity,
     check_nonlinearity,
+    run_model,
 )
 from pipeline.counterfactual import compute_counterfactual
 from pipeline.anomalies import detect_anomalies
@@ -224,6 +225,104 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
         },
     })
 
+    # ── Step 2.6: Out-of-sample backtest ──────────────────────────────────
+    yield _sse({
+        "type": "step",
+        "id": "backtest",
+        "title": "Out-of-Sample Backtest",
+        "reasoning": (
+            "Splitting data 80/20 by time. Training on the first 80% and "
+            "evaluating R², RMSE, and MAE on the held-out 20% to assess "
+            "model generalization."
+        ),
+    })
+
+    # --- Backtest split (80/20 time-based) ---
+    split_idx = int(len(df_weekly) * 0.8)
+    df_train = df_weekly.iloc[:split_idx]
+    df_test = df_weekly.iloc[split_idx:]
+    n_oos = len(df_test)
+
+    # --- Backtest model (train only) ---
+    diagnostics_train = run_diagnostics(df_train, spend_cols)
+    model_mode_train = diagnostics_train["model_mode"]
+    X_train, y_train, feature_state = build_design_matrix(
+        df_train,
+        spend_cols,
+        model_mode=model_mode_train,
+    )
+    result_train = run_model(X_train, y_train, spend_cols)
+
+    # --- Build test matrix with feature_state for consistency ---
+    X_test, y_test, _ = build_design_matrix(
+        df_test,
+        spend_cols,
+        model_mode=model_mode_train,
+        feature_state=feature_state,
+    )
+    r2_oos = None
+    rmse_oos = None
+    mae_oos = None
+    if n_oos >= 8:
+        y_test_vals = y_test.values if hasattr(y_test, "values") else y_test
+        if getattr(result_train, "lags_added", 0) == 0:
+            if result_train.ridge_applied:
+                X_pred = X_test.drop(columns=["const"], errors="ignore")
+            else:
+                X_pred = X_test
+            y_pred_test = result_train.model.predict(X_pred)
+        else:
+            lags_added = int(result_train.lags_added)
+            history = list(result_train.y.values)
+            y_pred_list = []
+            for i in range(len(X_test)):
+                row = X_test.iloc[i].copy()
+                if lags_added >= 1:
+                    row["lag_1"] = history[-1]
+                if lags_added >= 2:
+                    row["lag_2"] = history[-2]
+                row_df = pd.DataFrame([row])
+                if result_train.ridge_applied:
+                    row_df = row_df.drop(columns=["const"], errors="ignore")
+                y_hat = float(result_train.model.predict(row_df)[0])
+                y_pred_list.append(y_hat)
+                history.append(y_hat)
+            y_pred_test = np.array(y_pred_list, dtype=float)
+        ss_res = float(np.sum((y_test_vals - y_pred_test) ** 2))
+        ss_tot = float(np.sum((y_test_vals - float(result_train.y.mean())) ** 2))
+        r2_oos = (1.0 - ss_res / ss_tot) if ss_tot > 0 else None
+        rmse_oos = float(np.sqrt(np.mean((y_test_vals - y_pred_test) ** 2)))
+        mae_oos = float(np.mean(np.abs(y_test_vals - y_pred_test)))
+
+    oos_metrics = {
+        "oos_n_obs": n_oos,
+        "oos_r2": r2_oos if n_oos >= 8 else None,
+        "oos_rmse": rmse_oos if n_oos >= 8 else None,
+        "oos_mae": mae_oos if n_oos >= 8 else None,
+        "oos_split_ratio": 0.8,
+        "oos_model_mode": model_mode_train,
+    }
+
+    # Yield backtest result for Test Results panel
+    oos_result_metrics: Dict = {
+        "oos_n_obs": n_oos,
+        "oos_split_ratio": 0.8,
+        "oos_model_mode": model_mode_train,
+    }
+    if n_oos >= 8 and r2_oos is not None:
+        oos_result_metrics["oos_r2"] = round(r2_oos, 6)
+        oos_result_metrics["oos_rmse"] = round(rmse_oos, 4)
+        oos_result_metrics["oos_mae"] = round(mae_oos, 4)
+    else:
+        oos_result_metrics["note"] = f"OOS metrics require ≥8 holdout observations (had {n_oos})"
+    yield _sse({
+        "type": "result",
+        "id": "backtest",
+        "title": "Out-of-Sample Backtest",
+        "status": "pass" if n_oos >= 8 else "info",
+        "metrics": oos_result_metrics,
+    })
+
     # ── Step 2.75: Diagnostics ───────────────────────────────────────────
     yield _sse({
         "type": "step",
@@ -294,7 +393,7 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
         ),
     })
 
-    X, y = build_design_matrix(
+    X, y, _ = build_design_matrix(
         df_weekly,
         spend_cols,
         model_mode=model_mode,
@@ -566,7 +665,7 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
         ),
     })
 
-    confidence = compute_confidence(result, n_obs)
+    confidence = compute_confidence(result, n_obs, oos_metrics=oos_metrics)
 
     yield _sse({
         "type": "result",
@@ -605,9 +704,15 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
             diagnostics=diagnostics,
             model_config=model_config_with_hash,
             config_hash=config_hash,
+            oos_metrics=oos_metrics,
         )
     except Exception as e:
-        yield _sse({"type": "error", "id": "persist", "message": str(e)})
+        import traceback
+        tb = traceback.format_exc()
+        err_msg = f"Persist failed: {type(e).__name__}: {str(e)}"
+        print(err_msg, flush=True)
+        print(tb, flush=True)
+        yield _sse({"type": "error", "id": "persist", "message": err_msg})
         return
 
     yield _sse({
@@ -619,21 +724,27 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
     })
 
     # ── Complete ─────────────────────────────────────────────────────────
+    summary: Dict = {
+        "model_type": result.model_type,
+        "model_mode": model_mode,
+        "lags_added": result.lags_added,
+        "log_transform": result.log_transform_applied,
+        "hac_applied": result.hac_applied,
+        "r2": round(result.r2, 6),
+        "adjusted_r2": round(result.adj_r2, 6),
+        "confidence_level": confidence,
+        "incremental_impact": incremental,
+        "marginal_roi": marginal_roi,
+        "anomaly_count": len(anomalies),
+    }
+    if oos_metrics:
+        summary["oos_n_obs"] = oos_metrics.get("oos_n_obs")
+        summary["oos_r2"] = round(oos_metrics["oos_r2"], 6) if oos_metrics.get("oos_r2") is not None else None
+        summary["oos_rmse"] = round(oos_metrics["oos_rmse"], 4) if oos_metrics.get("oos_rmse") is not None else None
+        summary["oos_mae"] = round(oos_metrics["oos_mae"], 4) if oos_metrics.get("oos_mae") is not None else None
     yield _sse({
         "type": "complete",
         "id": "complete",
         "title": "Pipeline Complete",
-        "summary": {
-            "model_type": result.model_type,
-            "model_mode": model_mode,
-            "lags_added": result.lags_added,
-            "log_transform": result.log_transform_applied,
-            "hac_applied": result.hac_applied,
-            "r2": round(result.r2, 6),
-            "adjusted_r2": round(result.adj_r2, 6),
-            "confidence_level": confidence,
-            "incremental_impact": incremental,
-            "marginal_roi": marginal_roi,
-            "anomaly_count": len(anomalies),
-        },
+        "summary": summary,
     })
