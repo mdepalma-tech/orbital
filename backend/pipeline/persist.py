@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import uuid
 from typing import Dict, List
@@ -10,18 +9,6 @@ from typing import Dict, List
 import numpy as np
 from services.supabase_client import get_supabase
 from pipeline.modeling import ModelResult
-
-
-def _config_hash(result: ModelResult) -> str:
-    config = {
-        "target": "revenue",
-        "lags_added": result.lags_added,
-        "ridge_applied": result.ridge_applied,
-        "log_transform": result.log_transform_applied,
-        "hac_applied": result.hac_applied,
-    }
-    raw = json.dumps(config, sort_keys=True)
-    return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
 def _correlation_matrix(X, spend_cols: list[str]) -> dict:
@@ -45,9 +32,10 @@ def persist_results(
     confidence_level: str,
     n_obs: int,
     diagnostics: Dict | None = None,
+    model_config: Dict | None = None,
+    config_hash: str | None = None,
 ) -> str:
     sb = get_supabase()
-    config_hash = _config_hash(result)
 
     # ── models ───────────────────────────────────────────────────────────
     existing = (
@@ -83,8 +71,11 @@ def persist_results(
         "r2": round(result.r2, 6),
         "adjusted_r2": round(result.adj_r2, 6),
         "confidence_level": confidence_level,
-        "config_hash": config_hash,
     }
+    if config_hash is not None:
+        version_row["config_hash"] = config_hash
+    if model_config is not None:
+        version_row["model_config"] = json.dumps(model_config)
 
     if diagnostics:
         version_row["data_strength_score"] = diagnostics["score"]

@@ -1,14 +1,17 @@
 """POST /v1/projects/{project_id}/run — full deterministic modeling pipeline."""
 
+import hashlib
+import json
+
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from schemas.responses import RunModelResponse
 from pipeline.fetch import fetch_project_data
-from pipeline.validate import validate_and_prepare
+from pipeline.validate import validate_and_prepare, EPSILON
 from pipeline.aggregate import apply_event_dummies, aggregate_to_weekly
 from pipeline.diagnostics import run_diagnostics
-from pipeline.matrix import build_design_matrix
+from pipeline.matrix import build_design_matrix, get_model_config
 from pipeline.modeling import run_model
 from pipeline.counterfactual import compute_counterfactual
 from pipeline.anomalies import detect_anomalies
@@ -54,11 +57,41 @@ def run_pipeline(project_id: str):
     # Step 2.5 — Weekly aggregation
     daily = apply_event_dummies(daily, events_clean)
     df_weekly = aggregate_to_weekly(daily, spend_cols)
+
+    # Remove weekly-constant spend columns
+    weekly_varying_spend_cols = [
+        c for c in spend_cols
+        if c in df_weekly.columns and df_weekly[c].std() > EPSILON
+    ]
+    dropped_weekly_constant = [
+        c for c in spend_cols
+        if c not in weekly_varying_spend_cols
+    ]
+    spend_cols = weekly_varying_spend_cols
+
+    if not spend_cols:
+        raise HTTPException(
+            status_code=400,
+            detail="All spend channels are constant at weekly level; cannot estimate channel effects.",
+        )
+
     n_obs = len(df_weekly)
 
     # Step 2.75 — Diagnostics
-    diagnostics = run_diagnostics(df_weekly, spend_cols)
+    diagnostics = run_diagnostics(
+        df_weekly,
+        spend_cols,
+        dropped_weekly_constant=dropped_weekly_constant,
+    )
     model_mode = diagnostics["model_mode"]
+
+    config = get_model_config(model_mode)
+    model_config = {
+        "model_mode": model_mode,
+        "use_adstock": config["use_adstock"],
+        "adstock_alpha": config["adstock_alpha"],
+        "use_log_pre_fit": config["use_log"],
+    }
 
     # Step 3 — Build design matrix
     X, y = build_design_matrix(
@@ -70,6 +103,23 @@ def run_pipeline(project_id: str):
 
     # Steps 4–9 — Model fitting + decision tree
     result = run_model(X, y, spend_cols)
+
+    model_config.update({
+        "model_type": result.model_type,
+        "ridge_applied": result.ridge_applied,
+        "ridge_alpha": 1.0 if result.ridge_applied else None,
+        "lags_added": result.lags_added,
+        "hac_applied": result.hac_applied,
+        "log_transform_post_fit": result.log_transform_applied,
+    })
+    config_hash = hashlib.sha256(
+        json.dumps(model_config, sort_keys=True).encode()
+    ).hexdigest()
+
+    model_config_with_hash = {
+        **model_config,
+        "config_hash": config_hash,
+    }
 
     # Step 10 — Counterfactual
     incremental, marginal_roi = compute_counterfactual(result, spend_cols)
@@ -92,6 +142,8 @@ def run_pipeline(project_id: str):
             confidence_level=confidence,
             n_obs=n_obs,
             diagnostics=diagnostics,
+            model_config=model_config_with_hash,
+            config_hash=config_hash,
         )
     except Exception as e:
         raise HTTPException(

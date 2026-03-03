@@ -50,16 +50,18 @@ interface ChatMessage {
 type LeftTab = "assistant" | "log";
 
 function buildDiagnosticsExplanation(metrics: Record<string, unknown>): string {
-  const score = metrics.score as number;
-  const mode = metrics.model_mode as string;
-  const band = metrics.data_confidence_band as string;
+  const score = (metrics.score as number) ?? 0;
+  const mode = (metrics.model_mode as string) ?? "diagnostic_stabilized";
+  const band = (metrics.data_confidence_band as string) ?? "Low";
   const snapshot = metrics.snapshot as Record<string, unknown> | undefined;
   const reasons = metrics.gating_reasons as string[] | undefined;
 
   const modeName =
     mode === "causal_full"
       ? "Causal Full — the engine will run the complete econometric test suite (VIF, autocorrelation, heteroskedasticity, nonlinearity) with strict gating."
-      : "Diagnostic Stabilized — the engine will use regularized estimation with relaxed gating thresholds to compensate for limited data strength.";
+      : mode === "causal_cautious"
+        ? "Causal Cautious — the engine runs econometric tests with a balanced approach between full causal inference and stability."
+        : "Diagnostic Stabilized — the engine will use regularized estimation with relaxed gating thresholds to compensate for limited data strength.";
 
   let msg = `Your data scored **${score}/100** — Data Confidence Band: **${band}**.\n\n`;
   msg += `The engine selected **${modeName}**\n\n`;
@@ -161,12 +163,31 @@ function RunPageInner() {
   useEffect(() => {
     if (!projectId) return;
 
-    const es = new EventSource(
-      `http://localhost:8000/v1/projects/${projectId}/run/stream`
-    );
+    // Reset state for a fresh stream (handles React Strict Mode double-mount)
+    setReasoning([]);
+    setResults([]);
+    setComplete(null);
+    setError(null);
+    diagnosticsSentRef.current = false;
+    doneRef.current = false;
 
+    const streamUrl =
+      process.env.NEXT_PUBLIC_ORBITAL_BACKEND_URL
+        ? `${process.env.NEXT_PUBLIC_ORBITAL_BACKEND_URL}/v1/projects/${projectId}/run/stream`
+        : `/api/projects/${projectId}/run/stream`;
+    const es = new EventSource(streamUrl);
+
+    let cancelled = false;
     es.onmessage = (e) => {
-      const data: PipelineEvent = JSON.parse(e.data);
+      if (cancelled) return;
+      let data: PipelineEvent;
+      try {
+        data = JSON.parse(e.data) as PipelineEvent;
+      } catch (err) {
+        console.error("Failed to parse stream event:", err);
+        console.error("Raw data (first 200 chars):", String(e.data).slice(0, 200));
+        return;
+      }
 
       switch (data.type) {
         case "step":
@@ -192,7 +213,48 @@ function RunPageInner() {
               r.id === data.id ? { ...r, status: "done" as const } : r
             )
           );
-          setResults((prev) => [...prev, data as ResultEvent]);
+          setResults((prev) => {
+            const next = [...prev, data as ResultEvent];
+            // If we got matrix/ols but never received diagnostics, inject placeholder
+            if (
+              (data.id === "matrix" || data.id === "ols") &&
+              !next.some((r) => r.id === "diagnostics")
+            ) {
+              const placeholder: ResultEvent = {
+                type: "result",
+                id: "diagnostics",
+                title: "Data Diagnostics",
+                status: "warn",
+                metrics: {
+                  score: 0,
+                  model_mode: "diagnostic_stabilized",
+                  data_confidence_band: "Low",
+                  snapshot: {},
+                  gating_reasons: ["Diagnostics event was not received by client"],
+                },
+              };
+              // Insert diagnostics before matrix in display order
+              const insertIdx = next.findIndex((r) => r.id === "matrix" || r.id === "ols");
+              next.splice(insertIdx, 0, placeholder);
+            }
+            return next;
+          });
+
+          if (
+            (data.id === "matrix" || data.id === "ols") &&
+            !diagnosticsSentRef.current
+          ) {
+            diagnosticsSentRef.current = true;
+            setChatMessages((prev) => [
+              ...prev,
+              {
+                id: `diag-fallback-${Date.now()}`,
+                role: "assistant",
+                content:
+                  "The data diagnostics step ran on the server. If the diagnostics card shows a warning above, the event may not have been received by the client. Check your connection and backend logs.",
+              },
+            ]);
+          }
 
           if (data.id === "diagnostics" && !diagnosticsSentRef.current) {
             diagnosticsSentRef.current = true;
@@ -239,6 +301,7 @@ function RunPageInner() {
     };
 
     return () => {
+      cancelled = true;
       es.close();
     };
   }, [projectId]);

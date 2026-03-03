@@ -142,13 +142,13 @@ def check_autocorrelation(
     if result.ljung_box_p >= 0.05:
         return result
 
-    # Add lag 1
+    # Add lag 1: lag_1 = y_{t-1}, preserve original index
     X = result.X.copy()
     y = result.y.copy()
     X["lag_1"] = y.shift(1)
     mask = X["lag_1"].notna()
-    X = X[mask].reset_index(drop=True)
-    y = y[mask].reset_index(drop=True)
+    X = X.loc[mask]
+    y = y.loc[mask]
 
     new_result = _refit(X, y, use_ridge)
     new_result.lags_added = 1
@@ -160,13 +160,13 @@ def check_autocorrelation(
     if new_result.ljung_box_p >= 0.05:
         return new_result
 
-    # Add lag 2
+    # Add lag 2: lag_2 = y_{t-2} (use original result.y)
     X2 = new_result.X.copy()
     y2 = new_result.y.copy()
-    X2["lag_2"] = y2.shift(1)
-    mask2 = X2["lag_2"].notna()
-    X2 = X2[mask2].reset_index(drop=True)
-    y2 = y2[mask2].reset_index(drop=True)
+    X2["lag_2"] = result.y.shift(2)
+    mask2 = X2[["lag_1", "lag_2"]].notna().all(axis=1)
+    X2 = X2.loc[mask2]
+    y2 = y2.loc[mask2]
 
     new_result2 = _refit(X2, y2, use_ridge)
     new_result2.lags_added = 2
@@ -185,6 +185,8 @@ def check_autocorrelation(
         )
         new_result2.model = hac_model
         new_result2.coefficients = hac_model.params
+        new_result2.predicted = hac_model.fittedvalues.values
+        new_result2.residuals = hac_model.resid.values
         new_result2.hac_applied = True
 
     return new_result2
@@ -205,6 +207,8 @@ def check_heteroskedasticity(result: ModelResult) -> ModelResult:
             )
             result.model = hac_model
             result.coefficients = hac_model.params
+            result.predicted = hac_model.fittedvalues.values
+            result.residuals = hac_model.resid.values
             result.hac_applied = True
     except Exception:
         pass
@@ -237,6 +241,15 @@ def check_nonlinearity(
         test.hac_applied = result.hac_applied
         test.vif_values = result.vif_values
         test.dw_stat = result.dw_stat
+        # If HAC was applied to current model, refit log model with HAC for consistent p-values/bse
+        if result.hac_applied and not result.ridge_applied:
+            hac_model = sm.OLS(test.y, test.X).fit(
+                cov_type="HAC", cov_kwds={"maxlags": 1}
+            )
+            test.model = hac_model
+            test.coefficients = hac_model.params
+            test.predicted = hac_model.fittedvalues.values
+            test.residuals = hac_model.resid.values
         return test
 
     return result

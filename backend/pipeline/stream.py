@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
+import re
 from typing import Dict, Generator
 
 from pipeline.fetch import fetch_project_data
-from pipeline.validate import validate_and_prepare
+from pipeline.validate import validate_and_prepare, EPSILON
 from pipeline.aggregate import apply_event_dummies, aggregate_to_weekly
 from pipeline.diagnostics import run_diagnostics
-from pipeline.matrix import build_design_matrix
+from pipeline.matrix import build_design_matrix, get_model_config
 from pipeline.modeling import (
     ModelResult,
     fit_ols,
@@ -27,8 +30,53 @@ import numpy as np
 import pandas as pd
 
 
+def _is_bad_float(val) -> bool:
+    """True if value is NaN or Inf (invalid in JSON for JS parse)."""
+    try:
+        if isinstance(val, (int, str, bool, type(None))):
+            return False
+        f = float(val) if not isinstance(val, float) else val
+        return math.isnan(f) or math.isinf(f)
+    except (TypeError, ValueError):
+        return False
+
+
+def _sanitize_for_json(obj):
+    """Recursively sanitize so JSON is valid (no NaN/Inf, JS-parseable)."""
+    if isinstance(obj, dict):
+        return {k: _sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_for_json(v) for v in obj]
+    if hasattr(obj, "item"):
+        val = obj.item()
+        return _sanitize_for_json(val)
+    if hasattr(obj, "isoformat"):
+        return obj.isoformat()
+    if isinstance(obj, (int, float)) and _is_bad_float(obj):
+        return None
+    return obj
+
+
+def _json_serializer(obj):
+    """Convert numpy/pandas types for JSON. Return None for NaN/Inf (JS-invalid)."""
+    if hasattr(obj, "item"):
+        val = obj.item()
+        return None if _is_bad_float(val) else val
+    if hasattr(obj, "isoformat"):
+        return obj.isoformat()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
 def _sse(data: dict) -> str:
-    return f"data: {json.dumps(data)}\n\n"
+    sanitized = _sanitize_for_json(data)
+    out = json.dumps(sanitized, default=_json_serializer)
+    # Replace NaN/Inf (invalid for JS JSON.parse) with null in all contexts
+    out = re.sub(r":\s*NaN\b", ": null", out)
+    out = re.sub(r",\s*NaN\b", ", null", out)
+    out = re.sub(r"\[\s*NaN\b", "[ null", out)
+    out = re.sub(r":\s*-?Infinity\b", ": null", out)
+    out = re.sub(r",\s*-?Infinity\b", ", null", out)
+    return f"data: {out}\n\n"
 
 
 def stream_pipeline(project_id: str) -> Generator[str, None, None]:
@@ -133,6 +181,26 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
 
     daily = apply_event_dummies(daily, events_clean)
     df_weekly = aggregate_to_weekly(daily, spend_cols)
+
+    # Remove weekly-constant spend columns
+    weekly_varying_spend_cols = [
+        c for c in spend_cols
+        if c in df_weekly.columns and df_weekly[c].std() > EPSILON
+    ]
+    dropped_weekly_constant = [
+        c for c in spend_cols
+        if c not in weekly_varying_spend_cols
+    ]
+    spend_cols = weekly_varying_spend_cols
+
+    if not spend_cols:
+        yield _sse({
+            "type": "error",
+            "id": "aggregate",
+            "message": "All spend channels are constant at weekly level; cannot estimate channel effects.",
+        })
+        return
+
     n_obs = len(df_weekly)
 
     if n_obs == 0:
@@ -171,17 +239,31 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
     })
 
     try:
-        diagnostics = run_diagnostics(df_weekly, spend_cols)
+        diagnostics = run_diagnostics(
+            df_weekly,
+            spend_cols,
+            dropped_weekly_constant=dropped_weekly_constant,
+        )
     except Exception as e:
         yield _sse({"type": "error", "id": "diagnostics", "message": str(e)})
         return
 
     model_mode = diagnostics["model_mode"]
 
-    # Ensure all metrics are JSON-serializable (no numpy types)
+    config = get_model_config(model_mode)
+    model_config = {
+        "model_mode": model_mode,
+        "use_adstock": config["use_adstock"],
+        "adstock_alpha": config["adstock_alpha"],
+        "use_log_pre_fit": config["use_log"],
+    }
+
+    # Ensure all metrics are JSON-serializable (no numpy types, no NaN/Inf)
     def _to_native(val):
         if hasattr(val, "item"):
-            return val.item()
+            val = val.item()
+        if isinstance(val, (int, float)) and _is_bad_float(val):
+            return None
         return val
 
     diag_metrics = {
@@ -401,6 +483,23 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
         },
     })
 
+    model_config.update({
+        "model_type": result.model_type,
+        "ridge_applied": result.ridge_applied,
+        "ridge_alpha": 1.0 if result.ridge_applied else None,
+        "lags_added": result.lags_added,
+        "hac_applied": result.hac_applied,
+        "log_transform_post_fit": result.log_transform_applied,
+    })
+    config_hash = hashlib.sha256(
+        json.dumps(model_config, sort_keys=True).encode()
+    ).hexdigest()
+
+    model_config_with_hash = {
+        **model_config,
+        "config_hash": config_hash,
+    }
+
     # ── Step 9: Counterfactual ───────────────────────────────────────────
     yield _sse({
         "type": "step",
@@ -504,6 +603,8 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
             confidence_level=confidence,
             n_obs=n_obs,
             diagnostics=diagnostics,
+            model_config=model_config_with_hash,
+            config_hash=config_hash,
         )
     except Exception as e:
         yield _sse({"type": "error", "id": "persist", "message": str(e)})
