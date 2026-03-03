@@ -18,7 +18,7 @@ def run_diagnostics(df_weekly: pd.DataFrame, spend_cols: List[str]) -> Dict:
     {
         "snapshot": {...},
         "score": int,
-        "model_mode": "causal_full" | "diagnostic_stabilized",
+        "model_mode": "causal_full" | "causal_cautious" | "diagnostic_stabilized",
         "data_confidence_band": "High" | "Moderate" | "Low",
         "gating_reasons": [...]
     }
@@ -70,7 +70,7 @@ def run_diagnostics(df_weekly: pd.DataFrame, spend_cols: List[str]) -> Dict:
     else:
         snr = 0.0
 
-    # Pairwise correlation
+    # Pairwise correlation (kept for explainability; not used for scoring)
     max_corr = 0
     if len(spend_cols) > 1:
         corr = df_weekly[spend_cols].corr().abs()
@@ -79,64 +79,52 @@ def run_diagnostics(df_weekly: pd.DataFrame, spend_cols: List[str]) -> Dict:
         if len(vals) > 0:
             max_corr = float(vals.max())
 
-    score = 0
+    # Data Sufficiency Score (0–100, smooth additive)
+    # 1. Historical depth: full credit at >= 104 weeks
+    depth_score = min(n_obs / 104.0, 1.0) * 25.0
+
+    # 2. Coverage: full credit if >= 60% of weeks have active spend
+    coverage_ratio = n_active_weeks / n_obs if n_obs > 0 else 0.0
+    coverage_score = min(coverage_ratio / 0.6, 1.0) * 20.0
+
+    # 3. Inactivity: linear penalty
+    inactivity_score = max(0.0, 10.0 * (1.0 - zero_share))
+
+    # 4. Active CV: full credit at CV >= 0.3
+    cv_score = min(cv_active / 0.3, 1.0) * 20.0
+
+    # 5. SNR: log scaling, full credit at SNR ~ 2.0
+    snr_score = min(np.log1p(snr) / np.log1p(2.0), 1.0) * 25.0
+
+    total_score = depth_score + coverage_score + inactivity_score + cv_score + snr_score
+    score = int(round(total_score))
+    score = max(0, min(100, score))
+
+    # Gating reasons (structural failures)
     reasons = []
-
-    if n_obs >= 120: score += 20
-    elif n_obs >= 80: score += 10
-    else: reasons.append("Limited historical depth")
-
-    # Spend identifiability scoring (smooth additive; total max = 20 points)
-
-    # --- 1. Coverage score (0–10 points) ---
-    # Full credit at >= 20 active weeks
-    coverage_score = min(n_active_weeks / 20.0, 1.0) * 10.0
-    score += coverage_score
-
+    if n_obs < 80:
+        reasons.append("Limited historical depth")
     if n_active_weeks < 12:
         reasons.append("Limited active spend coverage")
-
-    # --- 2. Inactivity score (0–5 points) ---
-    # Full credit if zero_share <= 0.4
-    # Linearly declines to 0 at zero_share = 1.0
-    if zero_share <= 0.4:
-        inactivity_score = 5.0
-    else:
-        inactivity_score = max(0.0, 5.0 * (1.0 - (zero_share - 0.4) / 0.6))
-
-    score += inactivity_score
-
     if zero_share > 0.6:
         reasons.append("Spend frequently inactive")
-
-    # --- 3. Active CV score (0–5 points) ---
-    if cv_active >= 0.25:
-        cv_score = 5.0
-    elif cv_active >= 0.15:
-        cv_score = 2.5
-    else:
-        cv_score = 0.0
+    if cv_active < 0.12:
         reasons.append("Low active spend variability")
-
-    score += cv_score
-
-    if snr >= 1.2: score += 20
-    elif snr >= 0.9: score += 10
-    else: reasons.append("Low signal-to-noise")
-
-    if max_corr <= 0.85: score += 20
-    else: reasons.append("High channel collinearity")
-
-    score = max(0, int(round(score)))
-
-    if score >= 60:
+    if snr < 0.9:
+        reasons.append("Low signal-to-noise")
+    
+    if cv_active < 0.12:
+        model_mode = "diagnostic_stabilized"
+    elif score >= 70:
         model_mode = "causal_full"
+    elif score >= 55:
+        model_mode = "causal_cautious"
     else:
         model_mode = "diagnostic_stabilized"
 
-    if score >= 65:
+    if score >= 75:
         data_confidence = "High"
-    elif score >= 50:
+    elif score >= 55:
         data_confidence = "Moderate"
     else:
         data_confidence = "Low"
@@ -149,6 +137,11 @@ def run_diagnostics(df_weekly: pd.DataFrame, spend_cols: List[str]) -> Dict:
         "cv_active": round(cv_active, 4),
         "snr": round(snr, 4),
         "max_pairwise_corr": round(max_corr, 4),
+        "depth_score": round(depth_score, 2),
+        "coverage_score": round(coverage_score, 2),
+        "inactivity_score": round(inactivity_score, 2),
+        "cv_score": round(cv_score, 2),
+        "snr_score": round(snr_score, 2),
     }
 
     return {
