@@ -90,14 +90,19 @@ def fit_ridge(X: pd.DataFrame, y: pd.Series) -> ModelResult:
 # ── Step 5: VIF check ───────────────────────────────────────────────────────
 
 def compute_vif(X: pd.DataFrame, spend_cols: list[str]) -> Dict[str, float]:
-    cols = [c for c in spend_cols if c in X.columns]
-    if not cols:
-        return {}
-    subset = X[cols].values
-    vifs: Dict[str, float] = {}
-    for i, col in enumerate(cols):
-        vif = float(variance_inflation_factor(subset, i))
-        vifs[col] = round(vif, 4)
+    if "const" in X.columns:
+        X_no_const = X.drop(columns=["const"])
+    else:
+        X_no_const = X.copy()
+
+    values = X_no_const.values
+    vifs = {}
+
+    for i, col in enumerate(X_no_const.columns):
+        vif = float(variance_inflation_factor(values, i))
+        if col in spend_cols:
+            vifs[col] = round(vif, 4)
+
     return vifs
 
 
