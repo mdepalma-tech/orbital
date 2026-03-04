@@ -63,7 +63,23 @@ function parseCSV(fileContent: string): CsvRow[] {
   }
 }
 
-function toDateString(dateStr: string): string {
+function toLocalDate(dateStr: string, timezone: string): string {
+  const date = new Date(dateStr);
+  if (isNaN(date.getTime())) throw new Error(`Invalid date: ${dateStr}`);
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const parts = formatter.formatToParts(date);
+  const year = parts.find((p) => p.type === "year")?.value;
+  const month = parts.find((p) => p.type === "month")?.value;
+  const day = parts.find((p) => p.type === "day")?.value;
+  return `${year}-${month}-${day}`;
+}
+
+function toDateString(dateStr: string, timezone?: string): string {
   const date = new Date(dateStr);
   if (isNaN(date.getTime())) {
     const parts = dateStr.match(/(\d{1,2})[/\-](\d{1,2})[/\-](\d{2,4})/);
@@ -73,7 +89,7 @@ function toDateString(dateStr: string): string {
     }
     throw new Error(`Invalid date: ${dateStr}`);
   }
-  return date.toISOString().slice(0, 10);
+  return timezone ? toLocalDate(dateStr, timezone) : date.toISOString().slice(0, 10);
 }
 
 function detectSpendColumns(headers: string[]): Record<string, string> {
@@ -86,6 +102,16 @@ function detectSpendColumns(headers: string[]): Record<string, string> {
   }
 
   return found;
+}
+
+async function getProjectTimezone(projectId: string): Promise<string> {
+  const supabase = getSupabaseServiceClient();
+  const { data } = await supabase
+    .from("projects")
+    .select("timezone")
+    .eq("id", projectId)
+    .single();
+  return (data?.timezone as string) || "UTC";
 }
 
 async function ensureProjectExists(projectId: string, userId: string): Promise<void> {
@@ -109,7 +135,11 @@ async function ensureProjectExists(projectId: string, userId: string): Promise<v
   }
 }
 
-function pivotRows(rows: CsvRow[], spendColumns: Record<string, string>): ChannelDay[] {
+function pivotRows(
+  rows: CsvRow[],
+  spendColumns: Record<string, string>,
+  timezone?: string
+): ChannelDay[] {
   const results: ChannelDay[] = [];
 
   for (const row of rows) {
@@ -117,7 +147,7 @@ function pivotRows(rows: CsvRow[], spendColumns: Record<string, string>): Channe
 
     let date: string;
     try {
-      date = toDateString(row.date);
+      date = toDateString(row.date, timezone);
     } catch {
       continue;
     }
@@ -140,7 +170,8 @@ function pivotRows(rows: CsvRow[], spendColumns: Record<string, string>): Channe
 async function upsertAdSpend(
   projectId: string,
   rows: CsvRow[],
-  spendColumns: Record<string, string>
+  spendColumns: Record<string, string>,
+  timezone?: string
 ): Promise<void> {
   const supabase = getSupabaseServiceClient();
 
@@ -150,7 +181,7 @@ async function upsertAdSpend(
 
     let date: string;
     try {
-      date = toDateString(row.date);
+      date = toDateString(row.date, timezone);
     } catch {
       continue;
     }
@@ -257,9 +288,11 @@ export async function POST(
       );
     }
 
+    const timezone = await getProjectTimezone(projectId);
+
     let pivoted: ChannelDay[];
     try {
-      pivoted = pivotRows(parsedRows, spendColumns);
+      pivoted = pivotRows(parsedRows, spendColumns, timezone);
     } catch (error) {
       return NextResponse.json(
         { status: "error", message: error instanceof Error ? error.message : "Data processing failed" },
@@ -308,7 +341,7 @@ export async function POST(
     }
 
     await ensureProjectExists(projectId, user.id);
-    await upsertAdSpend(projectId, parsedRows, spendColumns);
+    await upsertAdSpend(projectId, parsedRows, spendColumns, timezone);
 
     return NextResponse.json({ status: "success", summary }, { status: 200 });
   } catch (error) {

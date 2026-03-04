@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import logging
 
 import numpy as np
 import pandas as pd
@@ -30,6 +31,7 @@ from pipeline.forecast import (
 from schemas.responses import ForecastRequest, ForecastResponse
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.post("/projects/{project_id}/forecast", response_model=ForecastResponse)
@@ -42,12 +44,27 @@ def forecast(project_id: str, body: ForecastRequest):
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
 
+    logger.info(
+        "forecast: loaded model_version=%s spend_cols=%s use_adstock=%s adstock_alpha=%s lags_added=%d",
+        loaded.version_id,
+        loaded.spend_cols,
+        loaded.model_config.get("use_adstock", False),
+        loaded.model_config.get("adstock_alpha"),
+        loaded.lags_added,
+    )
+
     try:
         last_week_index, baseline_spend = get_latest_weekly_row(
             project_id, loaded.spend_cols
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+    logger.info(
+        "forecast: baseline last_week_index=%d baseline_spend=%s",
+        last_week_index,
+        baseline_spend,
+    )
 
     mult = body.spend_multiplier
 
@@ -85,6 +102,12 @@ def forecast(project_id: str, body: ForecastRequest):
     if len(df) == 0:
         return ForecastResponse(version_id=loaded.version_id, predictions=[])
 
+    logger.info(
+        "forecast: df columns=%s df_spend_sample=%s",
+        list(df.columns),
+        {c: list(df[c].values) for c in loaded.spend_cols if c in df.columns},
+    )
+
     X = build_X_for_prediction(
         df,
         loaded.spend_cols,
@@ -92,9 +115,20 @@ def forecast(project_id: str, body: ForecastRequest):
         loaded.feature_state,
     )
     preds = predict_revenue(loaded, X)
+    pred_list = [round(float(p), 2) for p in preds]
+    week_deltas = (
+        [round(pred_list[i] - pred_list[i - 1], 2) for i in range(1, len(pred_list))]
+        if len(pred_list) > 1
+        else []
+    )
+    logger.info(
+        "forecast: predictions=%s week_over_week_delta=%s",
+        pred_list,
+        week_deltas,
+    )
     return ForecastResponse(
         version_id=loaded.version_id,
-        predictions=[round(float(p), 2) for p in preds],
+        predictions=pred_list,
     )
 
 

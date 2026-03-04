@@ -223,6 +223,19 @@ def build_X_for_prediction(
     # Alpha from stored config only — never hardcoded
     adstock_alpha = model_config.get("adstock_alpha") if use_adstock else None
 
+    logger.info(
+        "build_X_for_prediction: use_adstock=%s adstock_alpha=%s use_log=%s trend_mean=%s adstock_last=%s",
+        use_adstock,
+        adstock_alpha,
+        use_log,
+        feature_state.get("trend_mean"),
+        feature_state.get("adstock_last"),
+    )
+
+    missing_cols = [c for c in spend_cols if c not in df_weekly.columns]
+    if missing_cols:
+        logger.warning("build_X_for_prediction: spend_cols missing from df_weekly (will be 0): %s", missing_cols)
+
     X = pd.DataFrame(index=df_weekly.index)
 
     X["const"] = 1.0
@@ -246,6 +259,7 @@ def build_X_for_prediction(
             X[col] = 0.0
             continue
         raw = df_weekly[col].astype(float)
+        raw_vals = list(raw.values)
 
         if use_adstock and adstock_alpha is not None:
             transformed = []
@@ -260,11 +274,31 @@ def build_X_for_prediction(
                 adstock_last[col] = new_last
                 transformed.append(out.iloc[0])
             raw = pd.Series(transformed, index=raw.index)
+            logger.debug(
+                "build_X_for_prediction: %s raw_input=%s adstock_init=%s adstocked_output=%s",
+                col,
+                raw_vals,
+                feature_state.get("adstock_last", {}).get(col),
+                list(raw.values),
+            )
+        else:
+            logger.debug("build_X_for_prediction: %s raw=%s (no adstock)", col, raw_vals)
 
         if use_log:
             raw = np.log1p(np.maximum(raw, 0.0))
 
         X[col] = raw
+
+    # Log transformed spend for first/last week (post-log if applicable)
+    for col in spend_cols:
+        if col in X.columns:
+            logger.info(
+                "build_X_for_prediction: %s X values (week0=%.4f ... week_last=%.4f)",
+                col,
+                float(X[col].iloc[0]),
+                float(X[col].iloc[-1]) if len(X) > 1 else float(X[col].iloc[0]),
+            )
+    logger.info("build_X_for_prediction: trend week0=%.4f week_last=%.4f", float(X["trend"].iloc[0]), float(X["trend"].iloc[-1]) if len(X) > 1 else float(X["trend"].iloc[0]))
 
     return X
 
@@ -296,7 +330,16 @@ def predict_revenue(
 
     if loaded.lags_added == 0:
         X_aligned = X.reindex(columns=loaded.feature_names, fill_value=0.0)
-        return X_aligned.values @ beta
+        preds = X_aligned.values @ beta
+        # Debug: top coefficient contributors for first row
+        row0 = X_aligned.iloc[0]
+        contribs = [(f, float(row0.get(f, 0) * loaded.coefficients.get(f, 0))) for f in loaded.feature_names]
+        contribs.sort(key=lambda x: abs(x[1]), reverse=True)
+        logger.info(
+            "predict_revenue: no lags, top5 contributions row0: %s",
+            contribs[:5],
+        )
+        return np.asarray(preds, dtype=float)
 
     # Lag recursion: use last actuals from DB, then predicted values
     lag_history = list(loaded.feature_state.get("lag_history") or [])
@@ -310,6 +353,18 @@ def predict_revenue(
     else:
         lag_history = lag_history[-loaded.lags_added:]
 
+    lag_coefs = {f: loaded.coefficients.get(f, 0.0) for f in loaded.feature_names if f.startswith("lag_")}
+    init_lag1 = lag_history[-1] if loaded.lags_added >= 1 else None
+    init_lag2 = lag_history[-2] if loaded.lags_added >= 2 else None
+    logger.info(
+        "predict_revenue: lags_added=%d lag_history=%s lag_coefficients=%s (init_lag1=%.2f init_lag2=%.2f)",
+        loaded.lags_added,
+        lag_history,
+        lag_coefs,
+        (init_lag1 or 0),
+        (init_lag2 or 0),
+    )
+
     preds = []
     for i in range(len(X)):
         row = X.iloc[i].copy()
@@ -322,4 +377,9 @@ def predict_revenue(
         preds.append(y_hat)
         lag_history.append(y_hat)
 
-    return np.array(preds, dtype=float)
+    preds_arr = np.array(preds, dtype=float)
+    logger.info(
+        "predict_revenue: preds=%s",
+        [round(p, 2) for p in preds_arr],
+    )
+    return preds_arr

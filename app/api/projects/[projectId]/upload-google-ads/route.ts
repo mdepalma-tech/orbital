@@ -65,7 +65,23 @@ function resolveColumn(headers: string[], candidates: string[]): string | undefi
   return undefined;
 }
 
-function toDateString(dateStr: string): string {
+function toLocalDate(dateStr: string, timezone: string): string {
+  const date = new Date(dateStr);
+  if (isNaN(date.getTime())) throw new Error(`Invalid date: ${dateStr}`);
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const parts = formatter.formatToParts(date);
+  const year = parts.find((p) => p.type === "year")?.value;
+  const month = parts.find((p) => p.type === "month")?.value;
+  const day = parts.find((p) => p.type === "day")?.value;
+  return `${year}-${month}-${day}`;
+}
+
+function toDateString(dateStr: string, timezone?: string): string {
   const s = dateStr.trim();
   if (!s) throw new Error("Empty date string");
 
@@ -107,7 +123,7 @@ function toDateString(dateStr: string): string {
 
   const iso = new Date(s);
   if (!isNaN(iso.getTime())) {
-    return iso.toISOString().slice(0, 10);
+    return timezone ? toLocalDate(s, timezone) : iso.toISOString().slice(0, 10);
   }
 
   throw new Error(`Invalid date: ${dateStr}`);
@@ -197,7 +213,8 @@ function aggregateRows(
   costCol: string,
   campaignCol: string,
   channelTypeCol: string | undefined,
-  brandTerms: string[]
+  brandTerms: string[],
+  timezone?: string
 ): AggregationResult {
   const dailySpend = new Map<string, number>();
   const dailySearchBrand = new Map<string, number>();
@@ -218,7 +235,7 @@ function aggregateRows(
 
     let date: string;
     try {
-      date = toDateString(dateRaw);
+      date = toDateString(dateRaw, timezone);
     } catch {
       continue;
     }
@@ -270,6 +287,16 @@ function aggregateRows(
     includedRows,
     breakdownTotals,
   };
+}
+
+async function getProjectTimezone(projectId: string): Promise<string> {
+  const supabase = getSupabaseServiceClient();
+  const { data } = await supabase
+    .from("projects")
+    .select("timezone")
+    .eq("id", projectId)
+    .single();
+  return (data?.timezone as string) || "UTC";
 }
 
 async function ensureProjectExists(projectId: string, userId: string): Promise<void> {
@@ -420,13 +447,15 @@ export async function POST(
       );
     }
 
+    const timezone = await getProjectTimezone(projectId);
     const { dailySpend, dailySearchBrand, dailySearchNonbrand, dailyPmax, includedRows, breakdownTotals } = aggregateRows(
       parsedRows,
       dateCol,
       costCol,
       campaignCol,
       channelTypeCol ?? undefined,
-      brandTerms
+      brandTerms,
+      timezone
     );
 
     const sortedDates = Array.from(dailySpend.keys()).sort();
