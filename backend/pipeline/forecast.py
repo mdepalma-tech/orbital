@@ -59,6 +59,41 @@ def get_latest_weekly_row(
     return week_index, baseline_spend
 
 
+def get_historical_weekly_revenue(
+    project_id: str,
+    spend_cols: List[str],
+    history_weeks: int = 8,
+) -> List[Dict[str, Any]]:
+    """
+    Fetch last N weeks of (week_start, revenue, week_index) for chart display.
+    Returns list of dicts with week_start (ISO date string), revenue, week_index.
+    """
+    timeseries, spend, events = fetch_project_data(project_id)
+    daily, events_clean, valid_spend_cols = validate_and_prepare(
+        timeseries, spend, events
+    )
+    daily = apply_event_dummies(daily, events_clean)
+    df_weekly = aggregate_to_weekly(daily, valid_spend_cols)
+
+    if len(df_weekly) == 0:
+        return []
+
+    tail = df_weekly.tail(history_weeks)
+    result = []
+    for _, row in tail.iterrows():
+        ws = row["week_start"]
+        if hasattr(ws, "strftime"):
+            week_start_str = ws.strftime("%Y-%m-%d")
+        else:
+            week_start_str = str(ws)[:10]
+        result.append({
+            "week_start": week_start_str,
+            "revenue": round(float(row["revenue"]), 2),
+            "week_index": int(row["week_index"]),
+        })
+    return result
+
+
 @dataclass
 class LoadedModelVersion:
     """Model version loaded from DB for forecasting."""
@@ -169,6 +204,10 @@ def load_latest_model_version(
             else mv["model_config"]
         )
 
+    # Normalize use_log for backward compatibility (legacy persisted use_log_pre_fit)
+    if "use_log" not in model_config and "use_log_pre_fit" in model_config:
+        model_config["use_log"] = bool(model_config["use_log_pre_fit"])
+
     # feature_state from JSONB (Supabase returns dict)
     feature_state = mv.get("feature_state") or {}
     if isinstance(feature_state, str):
@@ -219,7 +258,7 @@ def build_X_for_prediction(
     df_weekly must have: week_index, and columns for spend_cols and optional event_*.
     """
     use_adstock = model_config.get("use_adstock", False)
-    use_log = model_config.get("use_log", False)
+    use_log = bool(model_config.get("use_log", False))
     # Alpha from stored config only — never hardcoded
     adstock_alpha = model_config.get("adstock_alpha") if use_adstock else None
 
@@ -230,6 +269,12 @@ def build_X_for_prediction(
         use_log,
         feature_state.get("trend_mean"),
         feature_state.get("adstock_last"),
+    )
+    logger.info(
+        "build_X_for_prediction: use_log keys use_log=%s use_log_pre_fit=%s -> resolved use_log=%s",
+        model_config.get("use_log"),
+        model_config.get("use_log_pre_fit"),
+        use_log,
     )
 
     missing_cols = [c for c in spend_cols if c not in df_weekly.columns]
@@ -331,6 +376,7 @@ def predict_revenue(
     if loaded.lags_added == 0:
         X_aligned = X.reindex(columns=loaded.feature_names, fill_value=0.0)
         preds = X_aligned.values @ beta
+        preds_arr = np.asarray(preds, dtype=float)
         # Debug: top coefficient contributors for first row
         row0 = X_aligned.iloc[0]
         contribs = [(f, float(row0.get(f, 0) * loaded.coefficients.get(f, 0))) for f in loaded.feature_names]
@@ -339,47 +385,58 @@ def predict_revenue(
             "predict_revenue: no lags, top5 contributions row0: %s",
             contribs[:5],
         )
-        return np.asarray(preds, dtype=float)
-
-    # Lag recursion: use last actuals from DB, then predicted values
-    lag_history = list(loaded.feature_state.get("lag_history") or [])
-    if len(lag_history) < loaded.lags_added:
-        logger.warning(
-            "lag_history has %d values but lags_added=%d; padding with zeros",
-            len(lag_history),
-            loaded.lags_added,
-        )
-        lag_history = [0.0] * (loaded.lags_added - len(lag_history)) + lag_history
     else:
-        lag_history = lag_history[-loaded.lags_added:]
+        # Lag recursion: use last actuals from DB, then predicted values
+        lag_history = list(loaded.feature_state.get("lag_history") or [])
+        if len(lag_history) < loaded.lags_added:
+            logger.warning(
+                "lag_history has %d values but lags_added=%d; padding with zeros",
+                len(lag_history),
+                loaded.lags_added,
+            )
+            lag_history = [0.0] * (loaded.lags_added - len(lag_history)) + lag_history
+        else:
+            lag_history = lag_history[-loaded.lags_added:]
 
-    lag_coefs = {f: loaded.coefficients.get(f, 0.0) for f in loaded.feature_names if f.startswith("lag_")}
-    init_lag1 = lag_history[-1] if loaded.lags_added >= 1 else None
-    init_lag2 = lag_history[-2] if loaded.lags_added >= 2 else None
+        lag_coefs = {f: loaded.coefficients.get(f, 0.0) for f in loaded.feature_names if f.startswith("lag_")}
+        init_lag1 = lag_history[-1] if loaded.lags_added >= 1 else None
+        init_lag2 = lag_history[-2] if loaded.lags_added >= 2 else None
+        logger.info(
+            "predict_revenue: lags_added=%d lag_history=%s lag_coefficients=%s (init_lag1=%.2f init_lag2=%.2f)",
+            loaded.lags_added,
+            lag_history,
+            lag_coefs,
+            (init_lag1 or 0),
+            (init_lag2 or 0),
+        )
+
+        preds = []
+        for i in range(len(X)):
+            row = X.iloc[i].copy()
+            if loaded.lags_added >= 1:
+                row["lag_1"] = lag_history[-1]
+            if loaded.lags_added >= 2:
+                row["lag_2"] = lag_history[-2]
+            row_aligned = row.reindex(loaded.feature_names, fill_value=0.0)
+            y_hat = float(row_aligned.values @ beta)
+            preds.append(y_hat)
+            lag_history.append(y_hat)
+
+        preds_arr = np.array(preds, dtype=float)
+        logger.info(
+            "predict_revenue: preds (log space)=%s",
+            [round(p, 2) for p in preds_arr],
+        )
+
+    # Inverse transform if trained on log target
+    use_log_target = bool(loaded.model_config.get("use_log_target", False))
+    if use_log_target:
+        smearing = float(loaded.model_config.get("smearing_factor", 1.0))
+        preds_arr = smearing * np.exp(preds_arr) - 1.0
+
+    preds_arr = np.maximum(preds_arr, 0.0)
     logger.info(
-        "predict_revenue: lags_added=%d lag_history=%s lag_coefficients=%s (init_lag1=%.2f init_lag2=%.2f)",
-        loaded.lags_added,
-        lag_history,
-        lag_coefs,
-        (init_lag1 or 0),
-        (init_lag2 or 0),
-    )
-
-    preds = []
-    for i in range(len(X)):
-        row = X.iloc[i].copy()
-        if loaded.lags_added >= 1:
-            row["lag_1"] = lag_history[-1]
-        if loaded.lags_added >= 2:
-            row["lag_2"] = lag_history[-2]
-        row_aligned = row.reindex(loaded.feature_names, fill_value=0.0)
-        y_hat = float(row_aligned.values @ beta)
-        preds.append(y_hat)
-        lag_history.append(y_hat)
-
-    preds_arr = np.array(preds, dtype=float)
-    logger.info(
-        "predict_revenue: preds=%s",
+        "predict_revenue: final preds (revenue space)=%s",
         [round(p, 2) for p in preds_arr],
     )
     return preds_arr

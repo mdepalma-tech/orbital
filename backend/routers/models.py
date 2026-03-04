@@ -24,14 +24,56 @@ from pipeline.stream import stream_pipeline
 from pipeline.forecast import (
     load_latest_model_version,
     get_latest_weekly_row,
+    get_historical_weekly_revenue,
     build_X_for_prediction,
     predict_revenue,
 )
+from services.supabase_client import get_supabase
 
-from schemas.responses import ForecastRequest, ForecastResponse
+from schemas.responses import (
+    ForecastRequest,
+    ForecastResponse,
+    ForecastScenarioCreate,
+    ForecastScenarioUpdate,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _get_latest_model_version_id(project_id: str) -> str:
+    """Resolve project_id -> latest model_version id. Raises ValueError if not found."""
+    sb = get_supabase()
+    model_resp = (
+        sb.table("models")
+        .select("id")
+        .eq("project_id", project_id)
+        .limit(1)
+        .execute()
+    )
+    if not model_resp.data:
+        raise ValueError(f"No model found for project {project_id}")
+    model_id = model_resp.data[0]["id"]
+    try:
+        mv_resp = (
+            sb.table("model_versions")
+            .select("id")
+            .eq("model_id", model_id)
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+    except Exception:
+        mv_resp = (
+            sb.table("model_versions")
+            .select("id")
+            .eq("model_id", model_id)
+            .limit(1)
+            .execute()
+        )
+    if not mv_resp.data:
+        raise ValueError(f"No model version found for project {project_id}")
+    return mv_resp.data[0]["id"]
 
 
 @router.post("/projects/{project_id}/forecast", response_model=ForecastResponse)
@@ -100,13 +142,36 @@ def forecast(project_id: str, body: ForecastRequest):
         df[col] = 0.0
 
     if len(df) == 0:
-        return ForecastResponse(version_id=loaded.version_id, predictions=[])
+        historical = get_historical_weekly_revenue(
+            project_id, loaded.spend_cols, body.history_weeks
+        )
+        return ForecastResponse(
+            version_id=loaded.version_id,
+            predictions=[],
+            historical=historical,
+        )
 
     logger.info(
         "forecast: df columns=%s df_spend_sample=%s",
         list(df.columns),
         {c: list(df[c].values) for c in loaded.spend_cols if c in df.columns},
     )
+
+    # Steady-state adstock when spend is constant: A_ss = spend / (1 - alpha)
+    use_adstock = loaded.model_config.get("use_adstock", False)
+    adstock_alpha = loaded.model_config.get("adstock_alpha")
+    if use_adstock and adstock_alpha is not None and adstock_alpha < 1.0:
+        denom = 1.0 - adstock_alpha
+        steady_state = {
+            col: round(baseline_spend.get(col, 0.0) * mult / denom, 2)
+            for col in loaded.spend_cols
+        }
+        logger.info(
+            "forecast: steady_state_adstock alpha=%.2f denominator=(1-alpha)=%.4f steady_state=%s",
+            adstock_alpha,
+            denom,
+            steady_state,
+        )
 
     X = build_X_for_prediction(
         df,
@@ -126,10 +191,166 @@ def forecast(project_id: str, body: ForecastRequest):
         pred_list,
         week_deltas,
     )
+    historical = get_historical_weekly_revenue(
+        project_id, loaded.spend_cols, body.history_weeks
+    )
+
     return ForecastResponse(
         version_id=loaded.version_id,
         predictions=pred_list,
+        last_week_index=last_week_index,
+        spend_cols=loaded.spend_cols,
+        baseline_spend=baseline_spend,
+        historical=historical,
     )
+
+
+# ── Forecast Scenarios CRUD ───────────────────────────────────────────────
+
+
+@router.get("/projects/{project_id}/forecast/scenarios")
+def list_forecast_scenarios(project_id: str):
+    """List saved forecast scenarios for the project's latest model version."""
+    try:
+        mv_id = _get_latest_model_version_id(project_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    sb = get_supabase()
+    resp = (
+        sb.table("forecast_scenarios")
+        .select("id, model_version_id, name, last_week_index, spend_cols, weeks, created_at")
+        .eq("model_version_id", mv_id)
+        .order("created_at", desc=True)
+        .execute()
+    )
+    items = [
+        {
+            "id": r["id"],
+            "model_version_id": r["model_version_id"],
+            "name": r["name"],
+            "last_week_index": r["last_week_index"],
+            "spend_cols": r["spend_cols"] or [],
+            "weeks": r["weeks"] or [],
+            "created_at": r.get("created_at"),
+        }
+        for r in (resp.data or [])
+    ]
+    return {"scenarios": items}
+
+
+@router.post("/projects/{project_id}/forecast/scenarios")
+def create_forecast_scenario(project_id: str, body: ForecastScenarioCreate):
+    """Save a new forecast scenario."""
+    try:
+        mv_id = _get_latest_model_version_id(project_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    sb = get_supabase()
+    weeks_json = [w.model_dump() for w in body.weeks]
+    row = {
+        "model_version_id": mv_id,
+        "name": body.name,
+        "last_week_index": body.last_week_index,
+        "spend_cols": body.spend_cols,
+        "weeks": weeks_json,
+    }
+    resp = sb.table("forecast_scenarios").insert(row).execute()
+    if not resp.data:
+        raise HTTPException(status_code=500, detail="Failed to create scenario")
+    created = resp.data[0]
+    return {
+        "id": created["id"],
+        "model_version_id": created["model_version_id"],
+        "name": created["name"],
+        "last_week_index": created["last_week_index"],
+        "spend_cols": created["spend_cols"],
+        "weeks": created["weeks"],
+        "created_at": created.get("created_at"),
+    }
+
+
+@router.get("/projects/{project_id}/forecast/scenarios/{scenario_id}")
+def get_forecast_scenario(project_id: str, scenario_id: str):
+    """Get a single forecast scenario by id."""
+    try:
+        mv_id = _get_latest_model_version_id(project_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    sb = get_supabase()
+    resp = (
+        sb.table("forecast_scenarios")
+        .select("*")
+        .eq("id", scenario_id)
+        .eq("model_version_id", mv_id)
+        .limit(1)
+        .execute()
+    )
+    if not resp.data:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    r = resp.data[0]
+    return {
+        "id": r["id"],
+        "model_version_id": r["model_version_id"],
+        "name": r["name"],
+        "last_week_index": r["last_week_index"],
+        "spend_cols": r["spend_cols"] or [],
+        "weeks": r["weeks"] or [],
+        "created_at": r.get("created_at"),
+    }
+
+
+@router.patch("/projects/{project_id}/forecast/scenarios/{scenario_id}")
+def update_forecast_scenario(project_id: str, scenario_id: str, body: ForecastScenarioUpdate):
+    """Update a forecast scenario (name and/or weeks)."""
+    try:
+        mv_id = _get_latest_model_version_id(project_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    sb = get_supabase()
+    updates = {}
+    if body.name is not None:
+        updates["name"] = body.name
+    if body.weeks is not None:
+        updates["weeks"] = [w.model_dump() for w in body.weeks]
+    if not updates:
+        raise HTTPException(status_code=400, detail="No updates provided")
+    resp = (
+        sb.table("forecast_scenarios")
+        .update(updates)
+        .eq("id", scenario_id)
+        .eq("model_version_id", mv_id)
+        .execute()
+    )
+    if not resp.data:
+        raise HTTPException(status_code=404, detail="Scenario not found")
+    r = resp.data[0]
+    return {
+        "id": r["id"],
+        "model_version_id": r["model_version_id"],
+        "name": r["name"],
+        "last_week_index": r["last_week_index"],
+        "spend_cols": r["spend_cols"],
+        "weeks": r["weeks"],
+        "created_at": r.get("created_at"),
+    }
+
+
+@router.delete("/projects/{project_id}/forecast/scenarios/{scenario_id}")
+def delete_forecast_scenario(project_id: str, scenario_id: str):
+    """Delete a forecast scenario."""
+    try:
+        mv_id = _get_latest_model_version_id(project_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    sb = get_supabase()
+    resp = (
+        sb.table("forecast_scenarios")
+        .delete()
+        .eq("id", scenario_id)
+        .eq("model_version_id", mv_id)
+        .execute()
+    )
+    return {"deleted": True}
 
 
 @router.get("/projects/{project_id}/run/stream")
@@ -196,12 +417,21 @@ def run_pipeline(project_id: str):
     # --- Backtest model (train only) ---
     diagnostics_train = run_diagnostics(df_train, spend_cols)
     model_mode_train = diagnostics_train["model_mode"]
+    config_train = get_model_config(model_mode_train)
     X_train, y_train, feature_state = build_design_matrix(
         df_train,
         spend_cols,
         model_mode=model_mode_train,
     )
     result_train = run_model(X_train, y_train, spend_cols)
+
+    # Smearing from training fold only (result_train fit on df_train)
+    use_log_target_train = config_train.get("use_log_target", False)
+    smearing_train = 1.0
+    if use_log_target_train:
+        residuals_train = result_train.y.values - result_train.predicted
+        smearing_train = float(np.mean(np.exp(residuals_train)))
+        smearing_train = max(smearing_train, 1e-6)
 
     # --- Build test matrix using same model_mode and feature_state ---
     X_test, y_test, _ = build_design_matrix(
@@ -253,11 +483,19 @@ def run_pipeline(project_id: str):
 
             y_pred_test = np.array(y_pred_list, dtype=float)
 
-        ss_res = float(np.sum((y_test_vals - y_pred_test) ** 2))
-        ss_tot = float(np.sum((y_test_vals - float(result_train.y.mean())) ** 2))
+        # OOS metrics always in revenue space (inverse-transform if use_log_target)
+        if use_log_target_train:
+            y_actual_rev = np.expm1(np.asarray(y_test_vals, dtype=float))
+            y_pred_rev = np.maximum(smearing_train * np.exp(y_pred_test) - 1.0, 0.0)
+        else:
+            y_actual_rev = np.asarray(y_test_vals, dtype=float)
+            y_pred_rev = np.asarray(y_pred_test, dtype=float)
+
+        ss_res = float(np.sum((y_actual_rev - y_pred_rev) ** 2))
+        ss_tot = float(np.sum((y_actual_rev - float(np.mean(y_actual_rev))) ** 2))
         r2_oos = (1.0 - ss_res / ss_tot) if ss_tot > 0 else None
-        rmse_oos = float(np.sqrt(np.mean((y_test_vals - y_pred_test) ** 2)))
-        mae_oos = float(np.mean(np.abs(y_test_vals - y_pred_test)))
+        rmse_oos = float(np.sqrt(np.mean((y_actual_rev - y_pred_rev) ** 2)))
+        mae_oos = float(np.mean(np.abs(y_actual_rev - y_pred_rev)))
 
     # Step 2.75 — Diagnostics (production: full data)
     diagnostics = run_diagnostics(
@@ -272,7 +510,8 @@ def run_pipeline(project_id: str):
         "model_mode": model_mode,
         "use_adstock": config["use_adstock"],
         "adstock_alpha": config["adstock_alpha"],
-        "use_log_pre_fit": config["use_log"],
+        "use_log": config["use_log"],
+        "use_log_target": config.get("use_log_target", False),
     }
 
     # Step 3 — Build design matrix
@@ -286,6 +525,13 @@ def run_pipeline(project_id: str):
     # Steps 4–9 — Model fitting + decision tree
     result = run_model(X, y, spend_cols)
 
+    use_log_target = config.get("use_log_target", False)
+    smearing_factor = 1.0
+    if use_log_target:
+        residuals = y.values - result.predicted
+        smearing_factor = float(np.mean(np.exp(residuals)))
+        smearing_factor = max(smearing_factor, 1e-6)
+
     model_config.update({
         "model_type": result.model_type,
         "ridge_applied": result.ridge_applied,
@@ -294,6 +540,8 @@ def run_pipeline(project_id: str):
         "hac_applied": result.hac_applied,
         "log_transform_post_fit": result.log_transform_applied,
         "feature_names": list(result.X.columns),
+        "use_log_target": use_log_target,
+        "smearing_factor": smearing_factor,
     })
     config_hash = hashlib.sha256(
         json.dumps(model_config, sort_keys=True).encode()
@@ -305,7 +553,12 @@ def run_pipeline(project_id: str):
     }
 
     # Step 10 — Counterfactual
-    incremental, marginal_roi = compute_counterfactual(result, spend_cols)
+    incremental, marginal_roi = compute_counterfactual(
+        result,
+        spend_cols,
+        use_log_target=use_log_target,
+        smearing_factor=smearing_factor,
+    )
 
     # Step 11 — Anomalies
     anomalies = detect_anomalies(result, df_weekly["week_start"])

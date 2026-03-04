@@ -1,7 +1,16 @@
 "use client";
 
-import { Suspense, useEffect, useRef, useState, useCallback } from "react";
+import { Suspense, useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ResponsiveContainer,
+  ReferenceLine,
+} from "recharts";
 import { DashboardSidebar } from "@/components/dashboard/sidebar";
 
 interface StepEvent {
@@ -109,6 +118,97 @@ function formatMetricKey(key: string): string {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+function addDays(dateStr: string, days: number): string {
+  const d = new Date(dateStr);
+  d.setDate(d.getDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+function formatShortDate(dateStr: string): string {
+  const d = new Date(dateStr);
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+interface ForecastChartProps {
+  historical: { week_start: string; revenue: number; week_index: number }[];
+  predictions: number[];
+}
+
+function ForecastChart({ historical, predictions }: ForecastChartProps) {
+  const chartData = useMemo(() => {
+    const actuals = historical.map((h) => ({
+      date: h.week_start,
+      revenue: h.revenue,
+      type: "actual" as const,
+    }));
+    const lastDate = historical.length > 0 ? historical[historical.length - 1].week_start : null;
+    const forecasts =
+      lastDate && predictions.length > 0
+        ? predictions.map((rev, i) => ({
+            date: addDays(lastDate, 7 * (i + 1)),
+            revenue: rev,
+            type: "forecast" as const,
+          }))
+        : [];
+    return [...actuals, ...forecasts];
+  }, [historical, predictions]);
+
+  if (chartData.length === 0) return null;
+
+  const firstForecastDate =
+    predictions.length > 0 && historical.length > 0
+      ? addDays(historical[historical.length - 1].week_start, 7)
+      : null;
+
+  return (
+    <div className="h-[260px] w-full rounded-xl border border-white/10 bg-white/5 p-3">
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart data={chartData} margin={{ top: 5, right: 5, left: -10, bottom: 0 }}>
+          <XAxis
+            dataKey="date"
+            stroke="#6b7280"
+            fontSize={11}
+            tickFormatter={formatShortDate}
+          />
+          <YAxis
+            stroke="#6b7280"
+            fontSize={11}
+            tickFormatter={(v) => `$${(v / 1000).toFixed(0)}k`}
+          />
+          <Tooltip
+            contentStyle={{
+              background: "#0B0F14",
+              border: "1px solid rgba(255,255,255,0.12)",
+              borderRadius: 8,
+            }}
+            formatter={(v, _n, props) => [
+              `$${Number(v ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2 })}`,
+              (props?.payload as { type?: string })?.type === "actual" ? "Actual" : "Forecast",
+            ]}
+            labelFormatter={(d) => formatShortDate(d)}
+          />
+          {firstForecastDate && (
+            <ReferenceLine
+              x={firstForecastDate}
+              stroke="#a78bfa"
+              strokeDasharray="4 4"
+              strokeOpacity={0.5}
+            />
+          )}
+          <Line
+            dataKey="revenue"
+            stroke="#60a5fa"
+            strokeWidth={2}
+            dot={{ r: 3 }}
+            connectNulls
+            name="Revenue"
+          />
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
 function formatMetricValue(value: unknown): string {
   if (value === null || value === undefined) return "—";
   if (typeof value === "boolean") return value ? "Yes" : "No";
@@ -137,6 +237,18 @@ function RunPageInner() {
   const [forecastPredictions, setForecastPredictions] = useState<number[] | null>(null);
   const [forecastLoading, setForecastLoading] = useState(false);
   const [forecastError, setForecastError] = useState<string | null>(null);
+  const [spendByWeek, setSpendByWeek] = useState<Record<string, number>[]>([]);
+  const [spendCols, setSpendCols] = useState<string[]>([]);
+  const [lastWeekIndex, setLastWeekIndex] = useState<number | null>(null);
+  const [scenarios, setScenarios] = useState<{ id: string; name: string }[]>([]);
+  const [selectedScenarioId, setSelectedScenarioId] = useState<string | null>(null);
+  const [saveScenarioOpen, setSaveScenarioOpen] = useState(false);
+  const [saveScenarioName, setSaveScenarioName] = useState("");
+  const [forecastHistorical, setForecastHistorical] = useState<
+    { week_start: string; revenue: number; week_index: number }[]
+  >([]);
+  const [historyWeeks, setHistoryWeeks] = useState(8);
+  const forecastDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
     {
       id: "welcome",
@@ -149,6 +261,7 @@ function RunPageInner() {
 
   const doneRef = useRef(false);
   const diagnosticsSentRef = useRef(false);
+  const forecastInitializedRef = useRef(false);
   const reasoningEndRef = useRef<HTMLDivElement>(null);
   const resultsEndRef = useRef<HTMLDivElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -163,37 +276,115 @@ function RunPageInner() {
     scrollToBottom();
   }, [reasoning, results, chatMessages, scrollToBottom]);
 
+  const runForecast = useCallback(
+    (
+      weeksOverride?: { week_index: number; meta_spend: number; google_spend: number; tiktok_spend: number }[],
+      historyWeeksOverride?: number
+    ) => {
+      if (!projectId) return;
+      const baseUrl = process.env.NEXT_PUBLIC_ORBITAL_BACKEND_URL
+        ? process.env.NEXT_PUBLIC_ORBITAL_BACKEND_URL
+        : "";
+      const url = baseUrl
+        ? `${baseUrl}/v1/projects/${projectId}/forecast`
+        : `/api/projects/${projectId}/forecast`;
+
+      const effectiveHistoryWeeks = historyWeeksOverride ?? historyWeeks;
+
+      setForecastLoading(true);
+      setForecastError(null);
+      const body = weeksOverride
+        ? { weeks: weeksOverride, history_weeks: effectiveHistoryWeeks }
+        : { horizon: 4, spend_multiplier: 1.0, history_weeks: effectiveHistoryWeeks };
+      fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      })
+        .then((res) => res.json())
+        .then((data) => {
+          if (data.predictions) {
+            setForecastPredictions(data.predictions);
+            setForecastHistorical(
+              (data.historical as { week_start: string; revenue: number; week_index: number }[]) ?? []
+            );
+            if (data.baseline_spend && data.spend_cols && data.last_week_index != null) {
+              setSpendCols(data.spend_cols);
+              setLastWeekIndex(data.last_week_index);
+              if (!weeksOverride && spendByWeek.length === 0) {
+                const base = data.baseline_spend as Record<string, number>;
+                setSpendByWeek(
+                  [1, 2, 3, 4].map(() => ({ ...base }))
+                );
+              }
+            }
+          } else {
+            setForecastError(data.error || data.detail || "Invalid forecast response");
+          }
+        })
+        .catch((err) => {
+          setForecastError(err?.message || "Failed to load forecast");
+        })
+        .finally(() => {
+          setForecastLoading(false);
+        });
+    },
+    [projectId, spendByWeek.length, historyWeeks]
+  );
+
   useEffect(() => {
     if (!projectId || !complete || leftTab !== "forecasting") return;
-    const baseUrl = process.env.NEXT_PUBLIC_ORBITAL_BACKEND_URL
-      ? process.env.NEXT_PUBLIC_ORBITAL_BACKEND_URL
-      : "";
-    const url = baseUrl
-      ? `${baseUrl}/v1/projects/${projectId}/forecast`
-      : `/api/projects/${projectId}/forecast`;
+    if (forecastInitializedRef.current) return;
+    forecastInitializedRef.current = true;
+    runForecast();
+  }, [projectId, complete, leftTab, runForecast]);
 
-    setForecastLoading(true);
-    setForecastError(null);
-    fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ horizon: 4, spend_multiplier: 1.0 }),
-    })
+  useEffect(() => {
+    if (!projectId || !complete || leftTab !== "forecasting") return;
+    const baseUrl = process.env.NEXT_PUBLIC_ORBITAL_BACKEND_URL || "";
+    const url = baseUrl
+      ? `${baseUrl}/v1/projects/${projectId}/forecast/scenarios`
+      : `/api/projects/${projectId}/forecast/scenarios`;
+    fetch(url)
       .then((res) => res.json())
       .then((data) => {
-        if (data.predictions) {
-          setForecastPredictions(data.predictions);
-        } else {
-          setForecastError(data.error || "Invalid forecast response");
+        if (data.scenarios) {
+          setScenarios(data.scenarios.map((s: { id: string; name: string }) => ({ id: s.id, name: s.name })));
         }
       })
-      .catch((err) => {
-        setForecastError(err?.message || "Failed to load forecast");
-      })
-      .finally(() => {
-        setForecastLoading(false);
-      });
+      .catch(() => {});
   }, [projectId, complete, leftTab]);
+
+  const handleSpendChange = useCallback(
+    (weekIdx: number, col: string, value: number) => {
+      setSpendByWeek((prev) => {
+        const next = prev.map((row, i) =>
+          i === weekIdx ? { ...row, [col]: value } : row
+        );
+        if (forecastDebounceRef.current) clearTimeout(forecastDebounceRef.current);
+        forecastDebounceRef.current = setTimeout(() => {
+          if (lastWeekIndex != null && spendCols.length > 0) {
+            const weeks = next.map((row, i) => ({
+              week_index: lastWeekIndex + i + 1,
+              meta_spend: row.meta_spend ?? 0,
+              google_spend: row.google_spend ?? 0,
+              tiktok_spend: row.tiktok_spend ?? 0,
+            }));
+            runForecast(weeks);
+          }
+          forecastDebounceRef.current = null;
+        }, 500);
+        return next;
+      });
+    },
+    [lastWeekIndex, spendCols.length, runForecast]
+  );
+
+  const CHANNEL_LABELS: Record<string, string> = {
+    meta_spend: "Meta",
+    google_spend: "Google",
+    tiktok_spend: "TikTok",
+  };
 
   useEffect(() => {
     if (!projectId) return;
@@ -205,6 +396,13 @@ function RunPageInner() {
     setError(null);
     setForecastPredictions(null);
     setForecastError(null);
+    setForecastHistorical([]);
+    setSpendByWeek([]);
+    setSpendCols([]);
+    setLastWeekIndex(null);
+    setScenarios([]);
+    setSelectedScenarioId(null);
+    forecastInitializedRef.current = false;
     diagnosticsSentRef.current = false;
     doneRef.current = false;
 
@@ -522,43 +720,248 @@ function RunPageInner() {
                         The Forecasting tab will load predictions once the pipeline completes.
                       </p>
                     </div>
-                  ) : forecastLoading ? (
+                  ) : forecastLoading && !forecastPredictions ? (
                     <div className="flex flex-col items-center justify-center min-h-[200px] gap-3">
                       <div className="w-6 h-6 border-2 border-violet-500/50 border-t-violet-400 rounded-full animate-spin" />
                       <p className="text-gray-400 font-light text-sm">Loading forecast...</p>
                     </div>
-                  ) : forecastError ? (
+                  ) : forecastError && !forecastPredictions ? (
                     <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/30">
                       <p className="text-red-400 text-sm font-light">{forecastError}</p>
                     </div>
-                  ) : forecastPredictions && forecastPredictions.length > 0 ? (
-                    <div className="space-y-4">
-                      <h3 className="text-lg font-light text-white">Revenue Forecast</h3>
-                      <p className="text-sm text-gray-400 font-light">
-                        Next {forecastPredictions.length} weeks (baseline spend)
-                      </p>
-                      <div className="space-y-2">
-                        {forecastPredictions.map((pred, i) => (
-                          <div
-                            key={i}
-                            className="flex items-center justify-between py-2 px-3 rounded-lg bg-white/5 border border-white/5"
-                          >
-                            <span className="text-gray-400 font-light text-sm">Week {i + 1}</span>
-                            <span className="text-violet-400 font-mono text-sm">
-                              ${pred.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                      <p className="text-xs text-gray-500 font-light pt-2">
-                        Total: ${forecastPredictions.reduce((a, b) => a + b, 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                      </p>
-                    </div>
                   ) : (
-                    <div className="flex flex-col items-center justify-center min-h-[200px] text-center">
-                      <p className="text-gray-400 font-light text-sm">
-                        No forecast data returned. Ensure the model has been run and data is available.
-                      </p>
+                    <div className="space-y-6">
+                      <h3 className="text-lg font-light text-white">Revenue Forecast</h3>
+
+                      {spendCols.length > 0 && lastWeekIndex != null && (
+                        <>
+                          <div>
+                            <p className="text-sm text-gray-400 font-light mb-3">
+                              Set spend per channel for the next 4 weeks
+                            </p>
+                            <div className="overflow-x-auto">
+                              <table className="w-full text-sm">
+                                <thead>
+                                  <tr className="border-b border-white/10">
+                                    <th className="text-left py-2 pr-4 text-gray-500 font-light">Week</th>
+                                    {spendCols.map((col) => (
+                                      <th key={col} className="text-right py-2 px-2 text-gray-500 font-light">
+                                        {CHANNEL_LABELS[col] ?? col}
+                                      </th>
+                                    ))}
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {[0, 1, 2, 3].map((weekIdx) => (
+                                    <tr key={weekIdx} className="border-b border-white/5">
+                                      <td className="py-2 pr-4 text-gray-400 font-light">
+                                        Week {lastWeekIndex + weekIdx + 1}
+                                      </td>
+                                      {spendCols.map((col) => (
+                                        <td key={col} className="py-1 px-2">
+                                          <input
+                                            type="number"
+                                            min={0}
+                                            step={10}
+                                            value={spendByWeek[weekIdx]?.[col] ?? 0}
+                                            onChange={(e) =>
+                                              handleSpendChange(
+                                                weekIdx,
+                                                col,
+                                                parseFloat(e.target.value) || 0
+                                              )
+                                            }
+                                            className="w-full min-w-[70px] px-2 py-1.5 bg-white/5 border border-white/10 rounded-lg text-white text-right font-mono text-sm focus:border-violet-500/50 focus:outline-none"
+                                          />
+                                        </td>
+                                      ))}
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                          </div>
+
+                          <div className="flex flex-wrap gap-3 items-center">
+                            <select
+                              value={selectedScenarioId ?? ""}
+                              onChange={(e) => {
+                                const id = e.target.value || null;
+                                setSelectedScenarioId(id);
+                                if (id) {
+                                  const baseUrl = process.env.NEXT_PUBLIC_ORBITAL_BACKEND_URL || "";
+                                  const scenUrl = baseUrl
+                                    ? `${baseUrl}/v1/projects/${projectId}/forecast/scenarios/${id}`
+                                    : `/api/projects/${projectId}/forecast/scenarios/${id}`;
+                                  fetch(scenUrl)
+                                    .then((r) => r.json())
+                                    .then((s) => {
+                                      if (s.weeks && Array.isArray(s.weeks)) {
+                                        setSpendByWeek(
+                                          s.weeks.map((w: Record<string, number>) => ({
+                                            meta_spend: w.meta_spend ?? 0,
+                                            google_spend: w.google_spend ?? 0,
+                                            tiktok_spend: w.tiktok_spend ?? 0,
+                                          }))
+                                        );
+                                        runForecast(s.weeks);
+                                      }
+                                    })
+                                    .catch(() => {});
+                                }
+                              }}
+                              className="px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-sm text-white font-light focus:border-violet-500/50 focus:outline-none"
+                            >
+                              <option value="">Load scenario...</option>
+                              {scenarios.map((s) => (
+                                <option key={s.id} value={s.id}>
+                                  {s.name}
+                                </option>
+                              ))}
+                            </select>
+                            <button
+                              onClick={() => {
+                                setSaveScenarioName("");
+                                setSaveScenarioOpen(true);
+                              }}
+                              className="px-4 py-2 bg-violet-500/20 border border-violet-500/30 rounded-lg text-violet-300 text-sm font-light hover:bg-violet-500/30 transition-colors"
+                            >
+                              Save as scenario
+                            </button>
+                          </div>
+
+                          {/* Chart: historical + forecast */}
+                          {((forecastHistorical.length > 0) || (forecastPredictions && forecastPredictions.length > 0)) && (
+                            <div className="space-y-3">
+                              <div className="flex flex-wrap items-center gap-3">
+                                <p className="text-sm text-gray-400 font-light">History</p>
+                                <select
+                                  value={historyWeeks}
+                                  onChange={(e) => {
+                                    const w = parseInt(e.target.value, 10);
+                                    setHistoryWeeks(w);
+                                    runForecast(
+                                      spendByWeek.length > 0
+                                        ? spendByWeek.map((row, i) => ({
+                                            week_index: (lastWeekIndex ?? 0) + i + 1,
+                                            meta_spend: row.meta_spend ?? 0,
+                                            google_spend: row.google_spend ?? 0,
+                                            tiktok_spend: row.tiktok_spend ?? 0,
+                                          }))
+                                        : undefined,
+                                      w
+                                    );
+                                  }}
+                                  className="px-2 py-1.5 bg-white/5 border border-white/10 rounded-lg text-sm text-white font-light focus:border-violet-500/50 focus:outline-none"
+                                >
+                                  <option value={4}>4 weeks</option>
+                                  <option value={6}>6 weeks</option>
+                                  <option value={8}>8 weeks (2 months)</option>
+                                  <option value={12}>12 weeks</option>
+                                  <option value={16}>16 weeks</option>
+                                  <option value={24}>24 weeks</option>
+                                </select>
+                              </div>
+                              <ForecastChart
+                                historical={forecastHistorical}
+                                predictions={forecastPredictions ?? []}
+                              />
+                            </div>
+                          )}
+                        </>
+                      )}
+
+                      {forecastPredictions && forecastPredictions.length > 0 && (
+                        <div className="space-y-2">
+                          <p className="text-sm text-gray-400 font-light">Predicted revenue</p>
+                          {forecastPredictions.map((pred, i) => (
+                            <div
+                              key={i}
+                              className="flex items-center justify-between py-2 px-3 rounded-lg bg-white/5 border border-white/5"
+                            >
+                              <span className="text-gray-400 font-light text-sm">Week {i + 1}</span>
+                              <span className="text-violet-400 font-mono text-sm">
+                                $
+                                {pred.toLocaleString(undefined, {
+                                  minimumFractionDigits: 2,
+                                  maximumFractionDigits: 2,
+                                })}
+                              </span>
+                            </div>
+                          ))}
+                          <p className="text-xs text-gray-500 font-light pt-2">
+                            Total: $
+                            {forecastPredictions
+                              .reduce((a, b) => a + b, 0)
+                              .toLocaleString(undefined, {
+                                minimumFractionDigits: 2,
+                                maximumFractionDigits: 2,
+                              })}
+                          </p>
+                        </div>
+                      )}
+
+                      {saveScenarioOpen && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+                          <div className="p-6 rounded-xl border border-white/10 bg-[#0B0F14] max-w-sm w-full mx-4">
+                            <h4 className="text-lg font-light text-white mb-4">Save scenario</h4>
+                            <input
+                              type="text"
+                              value={saveScenarioName}
+                              onChange={(e) => setSaveScenarioName(e.target.value)}
+                              placeholder="e.g. Aggressive Growth"
+                              className="w-full px-4 py-2 bg-white/5 border border-white/10 rounded-lg text-white placeholder-gray-500 font-light focus:border-violet-500/50 focus:outline-none mb-4"
+                            />
+                            <div className="flex gap-3">
+                              <button
+                                onClick={() => setSaveScenarioOpen(false)}
+                                className="flex-1 px-4 py-2 border border-white/20 rounded-lg text-gray-400 font-light hover:bg-white/5"
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                onClick={() => {
+                                  if (!saveScenarioName.trim() || !projectId || lastWeekIndex == null) return;
+                                  const baseUrl = process.env.NEXT_PUBLIC_ORBITAL_BACKEND_URL || "";
+                                  const url = baseUrl
+                                    ? `${baseUrl}/v1/projects/${projectId}/forecast/scenarios`
+                                    : `/api/projects/${projectId}/forecast/scenarios`;
+                                  const weeks = spendByWeek.map((row, i) => ({
+                                    week_index: lastWeekIndex + i + 1,
+                                    meta_spend: row.meta_spend ?? 0,
+                                    google_spend: row.google_spend ?? 0,
+                                    tiktok_spend: row.tiktok_spend ?? 0,
+                                  }));
+                                  fetch(url, {
+                                    method: "POST",
+                                    headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify({
+                                      name: saveScenarioName.trim(),
+                                      last_week_index: lastWeekIndex,
+                                      spend_cols: spendCols,
+                                      weeks,
+                                    }),
+                                  })
+                                    .then((r) => r.json())
+                                    .then((data) => {
+                                      if (data.id) {
+                                        setScenarios((prev) => [...prev, { id: data.id, name: data.name }]);
+                                        setSaveScenarioOpen(false);
+                                      } else {
+                                        setForecastError(data.error || "Failed to save");
+                                      }
+                                    })
+                                    .catch((err) => setForecastError(err?.message ?? "Failed to save"));
+                                }}
+                                disabled={!saveScenarioName.trim()}
+                                className="flex-1 px-4 py-2 bg-violet-500/30 border border-violet-500/40 rounded-lg text-violet-300 font-light hover:bg-violet-500/40 disabled:opacity-50 disabled:cursor-not-allowed"
+                              >
+                                Save
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>

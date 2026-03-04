@@ -246,12 +246,21 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
     # --- Backtest model (train only) ---
     diagnostics_train = run_diagnostics(df_train, spend_cols)
     model_mode_train = diagnostics_train["model_mode"]
+    config_train = get_model_config(model_mode_train)
     X_train, y_train, feature_state = build_design_matrix(
         df_train,
         spend_cols,
         model_mode=model_mode_train,
     )
     result_train = run_model(X_train, y_train, spend_cols)
+
+    # Smearing from training fold only (result_train fit on df_train)
+    use_log_target_train = config_train.get("use_log_target", False)
+    smearing_train = 1.0
+    if use_log_target_train:
+        residuals_train = result_train.y.values - result_train.predicted
+        smearing_train = float(np.mean(np.exp(residuals_train)))
+        smearing_train = max(smearing_train, 1e-6)
 
     # --- Build test matrix with feature_state for consistency ---
     X_test, y_test, _ = build_design_matrix(
@@ -288,11 +297,20 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
                 y_pred_list.append(y_hat)
                 history.append(y_hat)
             y_pred_test = np.array(y_pred_list, dtype=float)
-        ss_res = float(np.sum((y_test_vals - y_pred_test) ** 2))
-        ss_tot = float(np.sum((y_test_vals - float(result_train.y.mean())) ** 2))
+
+        # OOS metrics always in revenue space (inverse-transform if use_log_target)
+        if use_log_target_train:
+            y_actual_rev = np.expm1(np.asarray(y_test_vals, dtype=float))
+            y_pred_rev = np.maximum(smearing_train * np.exp(y_pred_test) - 1.0, 0.0)
+        else:
+            y_actual_rev = np.asarray(y_test_vals, dtype=float)
+            y_pred_rev = np.asarray(y_pred_test, dtype=float)
+
+        ss_res = float(np.sum((y_actual_rev - y_pred_rev) ** 2))
+        ss_tot = float(np.sum((y_actual_rev - float(np.mean(y_actual_rev))) ** 2))
         r2_oos = (1.0 - ss_res / ss_tot) if ss_tot > 0 else None
-        rmse_oos = float(np.sqrt(np.mean((y_test_vals - y_pred_test) ** 2)))
-        mae_oos = float(np.mean(np.abs(y_test_vals - y_pred_test)))
+        rmse_oos = float(np.sqrt(np.mean((y_actual_rev - y_pred_rev) ** 2)))
+        mae_oos = float(np.mean(np.abs(y_actual_rev - y_pred_rev)))
 
     oos_metrics = {
         "oos_n_obs": n_oos,
@@ -354,7 +372,8 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
         "model_mode": model_mode,
         "use_adstock": config["use_adstock"],
         "adstock_alpha": config["adstock_alpha"],
-        "use_log_pre_fit": config["use_log"],
+        "use_log": config["use_log"],
+        "use_log_target": config.get("use_log_target", False),
     }
 
     # Ensure all metrics are JSON-serializable (no numpy types, no NaN/Inf)
@@ -582,6 +601,13 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
         },
     })
 
+    use_log_target = config.get("use_log_target", False)
+    smearing_factor = 1.0
+    if use_log_target:
+        residuals = y.values - result.predicted
+        smearing_factor = float(np.mean(np.exp(residuals)))
+        smearing_factor = max(smearing_factor, 1e-6)
+
     model_config.update({
         "model_type": result.model_type,
         "ridge_applied": result.ridge_applied,
@@ -590,6 +616,8 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
         "hac_applied": result.hac_applied,
         "log_transform_post_fit": result.log_transform_applied,
         "feature_names": list(result.X.columns),
+        "use_log_target": use_log_target,
+        "smearing_factor": smearing_factor,
     })
     config_hash = hashlib.sha256(
         json.dumps(model_config, sort_keys=True).encode()
@@ -613,7 +641,12 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
         ),
     })
 
-    incremental, marginal_roi = compute_counterfactual(result, spend_cols)
+    incremental, marginal_roi = compute_counterfactual(
+        result,
+        spend_cols,
+        use_log_target=use_log_target,
+        smearing_factor=smearing_factor,
+    )
 
     yield _sse({
         "type": "result",
