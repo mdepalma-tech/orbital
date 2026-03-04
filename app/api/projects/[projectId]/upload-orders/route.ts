@@ -273,6 +273,18 @@ async function ensureProjectExists(projectId: string, userId: string): Promise<v
   }
 }
 
+// Persist selected timezone to project for spend upload alignment
+async function updateProjectTimezone(projectId: string, timezone: string): Promise<void> {
+  const supabase = getSupabaseServiceClient();
+  const { error } = await supabase
+    .from("projects")
+    .update({ timezone: timezone || "UTC" })
+    .eq("id", projectId);
+  if (error) {
+    throw new Error(`Failed to update project timezone: ${error.message}`);
+  }
+}
+
 // Upsert time series data to Supabase
 async function upsertTimeseries(
   projectId: string,
@@ -482,9 +494,10 @@ export async function POST(
       );
     }
 
-    // Ensure project exists, then upsert timeseries
+    // Ensure project exists, then upsert timeseries and persist timezone
     await ensureProjectExists(projectId, user.id);
     await upsertTimeseries(projectId, aggregatedData);
+    await updateProjectTimezone(projectId, timezone);
 
     const allWarnings = validation.warnings || [];
 

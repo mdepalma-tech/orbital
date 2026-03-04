@@ -134,6 +134,9 @@ function RunPageInner() {
 
   const [leftTab, setLeftTab] = useState<LeftTab>("assistant");
   const [collapsedResults, setCollapsedResults] = useState<Set<string>>(new Set());
+  const [forecastPredictions, setForecastPredictions] = useState<number[] | null>(null);
+  const [forecastLoading, setForecastLoading] = useState(false);
+  const [forecastError, setForecastError] = useState<string | null>(null);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
     {
       id: "welcome",
@@ -161,6 +164,38 @@ function RunPageInner() {
   }, [reasoning, results, chatMessages, scrollToBottom]);
 
   useEffect(() => {
+    if (!projectId || !complete || leftTab !== "forecasting") return;
+    const baseUrl = process.env.NEXT_PUBLIC_ORBITAL_BACKEND_URL
+      ? process.env.NEXT_PUBLIC_ORBITAL_BACKEND_URL
+      : "";
+    const url = baseUrl
+      ? `${baseUrl}/v1/projects/${projectId}/forecast`
+      : `/api/projects/${projectId}/forecast`;
+
+    setForecastLoading(true);
+    setForecastError(null);
+    fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ horizon: 4, spend_multiplier: 1.0 }),
+    })
+      .then((res) => res.json())
+      .then((data) => {
+        if (data.predictions) {
+          setForecastPredictions(data.predictions);
+        } else {
+          setForecastError(data.error || "Invalid forecast response");
+        }
+      })
+      .catch((err) => {
+        setForecastError(err?.message || "Failed to load forecast");
+      })
+      .finally(() => {
+        setForecastLoading(false);
+      });
+  }, [projectId, complete, leftTab]);
+
+  useEffect(() => {
     if (!projectId) return;
 
     // Reset state for a fresh stream (handles React Strict Mode double-mount)
@@ -168,6 +203,8 @@ function RunPageInner() {
     setResults([]);
     setComplete(null);
     setError(null);
+    setForecastPredictions(null);
+    setForecastError(null);
     diagnosticsSentRef.current = false;
     doneRef.current = false;
 
@@ -475,18 +512,55 @@ function RunPageInner() {
               </div>
             ) : leftTab === "forecasting" ? (
               <div className="flex-1 flex flex-col overflow-hidden">
-                <div className="flex-1 overflow-y-auto p-6 flex items-center justify-center">
-                  <div className="text-center max-w-sm">
-                    <div className="w-16 h-16 mx-auto mb-4 rounded-xl bg-violet-500/10 border border-violet-500/30 flex items-center justify-center">
-                      <svg className="w-8 h-8 text-violet-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.5}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M3 13.125C3 12.504 3.504 12 4.125 12h2.25c.621 0 1.125.504 1.125 1.125v6.75C7.5 20.496 6.996 21 6.375 21h-2.25A1.125 1.125 0 013 19.875v-6.75zM9.75 8.625c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125v11.25c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V8.625zM16.5 4.125c0-.621.504-1.125 1.125-1.125h2.25C20.496 3 21 3.504 21 4.125v15.75c0 .621-.504 1.125-1.125 1.125h-2.25a1.125 1.125 0 01-1.125-1.125V4.125z" />
-                      </svg>
+                <div className="flex-1 overflow-y-auto p-6">
+                  {!complete ? (
+                    <div className="flex flex-col items-center justify-center min-h-[200px] text-center">
+                      <p className="text-gray-400 font-light text-sm">
+                        Run the pipeline to build your model, then return here to view forecasts.
+                      </p>
+                      <p className="text-gray-500 font-light text-xs mt-2">
+                        The Forecasting tab will load predictions once the pipeline completes.
+                      </p>
                     </div>
-                    <h3 className="text-lg font-light text-white mb-2">Forecasting</h3>
-                    <p className="text-sm text-gray-400 font-light">
-                      Revenue and spend forecasting capabilities are coming soon. Run the pipeline to build your model, then return here to explore forecasts.
-                    </p>
-                  </div>
+                  ) : forecastLoading ? (
+                    <div className="flex flex-col items-center justify-center min-h-[200px] gap-3">
+                      <div className="w-6 h-6 border-2 border-violet-500/50 border-t-violet-400 rounded-full animate-spin" />
+                      <p className="text-gray-400 font-light text-sm">Loading forecast...</p>
+                    </div>
+                  ) : forecastError ? (
+                    <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/30">
+                      <p className="text-red-400 text-sm font-light">{forecastError}</p>
+                    </div>
+                  ) : forecastPredictions && forecastPredictions.length > 0 ? (
+                    <div className="space-y-4">
+                      <h3 className="text-lg font-light text-white">Revenue Forecast</h3>
+                      <p className="text-sm text-gray-400 font-light">
+                        Next {forecastPredictions.length} weeks (baseline spend)
+                      </p>
+                      <div className="space-y-2">
+                        {forecastPredictions.map((pred, i) => (
+                          <div
+                            key={i}
+                            className="flex items-center justify-between py-2 px-3 rounded-lg bg-white/5 border border-white/5"
+                          >
+                            <span className="text-gray-400 font-light text-sm">Week {i + 1}</span>
+                            <span className="text-violet-400 font-mono text-sm">
+                              ${pred.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                      <p className="text-xs text-gray-500 font-light pt-2">
+                        Total: ${forecastPredictions.reduce((a, b) => a + b, 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="flex flex-col items-center justify-center min-h-[200px] text-center">
+                      <p className="text-gray-400 font-light text-sm">
+                        No forecast data returned. Ensure the model has been run and data is available.
+                      </p>
+                    </div>
+                  )}
                 </div>
               </div>
             ) : (

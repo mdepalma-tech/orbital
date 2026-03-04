@@ -45,7 +45,23 @@ function resolveColumn(headers: string[], candidates: string[]): string | undefi
   return undefined;
 }
 
-function toDateString(dateStr: string): string {
+function toLocalDate(dateStr: string, timezone: string): string {
+  const date = new Date(dateStr);
+  if (isNaN(date.getTime())) throw new Error(`Invalid date: ${dateStr}`);
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: timezone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const parts = formatter.formatToParts(date);
+  const year = parts.find((p) => p.type === "year")?.value;
+  const month = parts.find((p) => p.type === "month")?.value;
+  const day = parts.find((p) => p.type === "day")?.value;
+  return `${year}-${month}-${day}`;
+}
+
+function toDateString(dateStr: string, timezone?: string): string {
   const s = dateStr.trim();
   if (!s) throw new Error("Empty date string");
 
@@ -87,7 +103,7 @@ function toDateString(dateStr: string): string {
 
   const iso = new Date(s);
   if (!isNaN(iso.getTime())) {
-    return iso.toISOString().slice(0, 10);
+    return timezone ? toLocalDate(s, timezone) : iso.toISOString().slice(0, 10);
   }
 
   throw new Error(`Invalid date: ${dateStr}`);
@@ -124,6 +140,16 @@ function parseCSV(fileContent: string): CsvRow[] {
   }
 }
 
+async function getProjectTimezone(projectId: string): Promise<string> {
+  const supabase = getSupabaseServiceClient();
+  const { data } = await supabase
+    .from("projects")
+    .select("timezone")
+    .eq("id", projectId)
+    .single();
+  return (data?.timezone as string) || "UTC";
+}
+
 async function ensureProjectExists(projectId: string, userId: string): Promise<void> {
   const supabase = getSupabaseServiceClient();
   const { data } = await supabase
@@ -148,7 +174,8 @@ async function ensureProjectExists(projectId: string, userId: string): Promise<v
 function aggregateRows(
   rows: CsvRow[],
   dateCol: string,
-  spendCol: string
+  spendCol: string,
+  timezone?: string
 ): { dailySpend: Map<string, number>; includedRows: number } {
   const dailySpend = new Map<string, number>();
   let includedRows = 0;
@@ -159,7 +186,7 @@ function aggregateRows(
 
     let date: string;
     try {
-      date = toDateString(dateRaw);
+      date = toDateString(dateRaw, timezone);
     } catch {
       continue;
     }
@@ -273,7 +300,8 @@ export async function POST(
       );
     }
 
-    const { dailySpend, includedRows } = aggregateRows(parsedRows, dateCol, spendCol);
+    const timezone = await getProjectTimezone(projectId);
+    const { dailySpend, includedRows } = aggregateRows(parsedRows, dateCol, spendCol, timezone);
 
     const sortedDates = Array.from(dailySpend.keys()).sort();
     const totalSpend = sortedDates.reduce(
