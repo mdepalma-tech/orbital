@@ -11,11 +11,11 @@ def get_model_config(model_mode: Optional[str]) -> Dict[str, Any]:
     Deterministic model config from model_mode. No randomness, no tuning.
     """
     if model_mode == "causal_full":
-        return {"use_adstock": True, "adstock_alpha": 0.5, "use_log": True}
+        return {"use_adstock": True, "adstock_alpha": 0.5, "use_log": True, "use_log_target": True}
     if model_mode == "causal_cautious":
-        return {"use_adstock": True, "adstock_alpha": 0.4, "use_log": True}
+        return {"use_adstock": True, "adstock_alpha": 0.4, "use_log": True, "use_log_target": True}
     # diagnostic_stabilized or None
-    return {"use_adstock": False, "adstock_alpha": None, "use_log": False}
+    return {"use_adstock": False, "adstock_alpha": None, "use_log": False, "use_log_target": False}
 
 
 def geometric_adstock(
@@ -95,7 +95,11 @@ def build_design_matrix(
 
         X[col] = raw
 
-    y = df_weekly["revenue"].astype(float)
+    y_raw = df_weekly["revenue"].astype(float)
+    if config.get("use_log_target", False):
+        y = np.log1p(np.maximum(y_raw, 0.0))
+    else:
+        y = y_raw
     y.index = X.index
 
     # Final sanity: no NaN

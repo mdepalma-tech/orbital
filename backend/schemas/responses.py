@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 
 class ForecastWeekInput(BaseModel):
@@ -14,11 +14,38 @@ class ForecastRequest(BaseModel):
     horizon: int = 4
     spend_multiplier: float = 1.0
     weeks: Optional[List[ForecastWeekInput]] = None
+    history_weeks: int = 8
 
 
 class ForecastResponse(BaseModel):
     version_id: str
     predictions: List[float]
+    last_week_index: Optional[int] = None
+    spend_cols: Optional[List[str]] = None
+    baseline_spend: Optional[Dict[str, float]] = None
+    historical: Optional[List[Dict[str, Any]]] = None
+
+
+class ForecastScenarioCreate(BaseModel):
+    name: str
+    last_week_index: int
+    spend_cols: List[str]
+    weeks: List[ForecastWeekInput]
+
+
+class ForecastScenarioUpdate(BaseModel):
+    name: Optional[str] = None
+    weeks: Optional[List[ForecastWeekInput]] = None
+
+
+class ForecastScenario(BaseModel):
+    id: str
+    model_version_id: str
+    name: str
+    last_week_index: int
+    spend_cols: List[str]
+    weeks: List[Dict]
+    created_at: Optional[str] = None
 
 
 class RunModelResponse(BaseModel):
