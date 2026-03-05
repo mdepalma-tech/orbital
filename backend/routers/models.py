@@ -37,6 +37,8 @@ from schemas.responses import (
     ForecastScenarioUpdate,
 )
 
+from pipeline.tree_builder import build_pipeline_tree
+
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
@@ -351,6 +353,13 @@ def delete_forecast_scenario(project_id: str, scenario_id: str):
         .execute()
     )
     return {"deleted": True}
+
+
+@router.get("/pipeline/tree")
+def get_pipeline_tree(force: bool = False):
+    """Return the pipeline tree as JSON. Rebuilds if source has changed."""
+    tree = build_pipeline_tree(force_rebuild=force)
+    return tree.to_dict()
 
 
 @router.get("/projects/{project_id}/run/stream")
