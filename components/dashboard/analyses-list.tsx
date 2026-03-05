@@ -1,12 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { randomUUID } from "@/lib/utils";
 
 interface Analysis {
   id: string;
+  projectId: string;
   name: string;
   created_at: string;
   status: "running" | "complete" | "error";
@@ -19,10 +20,27 @@ interface Analysis {
 
 export function AnalysesList({ userId }: { userId: string }) {
   const router = useRouter();
-  const [analyses] = useState<Analysis[]>([]);
+  const [analyses, setAnalyses] = useState<Analysis[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetch("/api/analyses")
+      .then((r) => r.json())
+      .then((d) => setAnalyses(d?.analyses ?? []))
+      .catch(() => setAnalyses([]))
+      .finally(() => setLoading(false));
+  }, [userId]);
 
   function startNewModel() {
     router.push(`/dashboard/build?projectId=${randomUUID()}`);
+  }
+
+  if (loading) {
+    return (
+      <div className="flex justify-center min-h-[300px] items-center">
+        <div className="w-8 h-8 border-2 border-violet-500/50 border-t-violet-400 rounded-full animate-spin" />
+      </div>
+    );
   }
 
   if (analyses.length === 0) {
@@ -74,7 +92,7 @@ export function AnalysesList({ userId }: { userId: string }) {
         {analyses.map((analysis) => (
           <Link
             key={analysis.id}
-            href={`/dashboard/analysis/${analysis.id}`}
+            href={`/dashboard/build/run?projectId=${analysis.projectId ?? analysis.id}`}
             className="group p-6 rounded-xl border border-white/10 bg-gradient-to-br from-white/5 to-transparent backdrop-blur-sm hover:border-blue-500/50 hover:shadow-lg hover:shadow-blue-500/20 transition-all duration-300"
           >
             <div className="flex items-start justify-between mb-4">

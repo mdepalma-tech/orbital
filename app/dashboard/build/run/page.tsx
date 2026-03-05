@@ -946,6 +946,7 @@ function RunPageInner() {
                                     .then((data) => {
                                       if (data.id) {
                                         setScenarios((prev) => [...prev, { id: data.id, name: data.name }]);
+                                        setSelectedScenarioId(data.id);
                                         setSaveScenarioOpen(false);
                                       } else {
                                         setForecastError(data.error || "Failed to save");
