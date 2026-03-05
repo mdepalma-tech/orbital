@@ -30,7 +30,9 @@ function formatShortDate(dateStr: string): string {
 }
 
 export function DashboardWidget({ projectId, widgetId, analysisName, onRemove }: DashboardWidgetProps) {
-  const [scenarios, setScenarios] = useState<{ id: string; name: string }[]>([]);
+  const [scenarios, setScenarios] = useState<
+    { id: string; name: string; weeks?: { week_index?: number; meta_spend?: number; google_spend?: number; tiktok_spend?: number }[] }[]
+  >([]);
   const [selectedScenarioId, setSelectedScenarioId] = useState<string | null>(null);
   const [predictions, setPredictions] = useState<number[] | null>(null);
   const [historical, setHistorical] = useState<{ week_start: string; revenue: number }[]>([]);
