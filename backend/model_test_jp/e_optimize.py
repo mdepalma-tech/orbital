@@ -26,14 +26,10 @@ def tune_decay_rates(
     """
     Find the per-channel adstock decay rates that minimise holdout MAPE.
 
-    Why tune decay rates?
-    The default decay of 0.5 for all channels is arbitrary. Meta might have a
+    A default decay of 0.5 for all channels is arbitrary, while Meta might have a
     short memory (decay=0.1), TikTok a longer one (decay=0.7). Wrong decay rates
     mean the adstocked feature doesn't reflect true exposure, directly hurting
     both train and holdout R².
-
-    Strategy: scipy.optimize with L-BFGS-B, run from n_restarts random starting
-    points to avoid local minima, return the best result.
 
     Args:
         df_train_raw     : Training DataFrame with RAW (pre-adstock) spend columns.

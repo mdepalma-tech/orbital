@@ -68,7 +68,7 @@ def plot_overfitting_diagnostics(
         holdout_metrics : Output of evaluate_holdout().
         df_train        : Training DataFrame (must have all feature + date cols).
         df_test         : Holdout DataFrame (must have all feature + date cols).
-        save_path       : Where to save the PNG.
+        save_path       : Where to save the image.
     """
     response_col = mmm_results['response_col']
 

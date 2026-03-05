@@ -14,9 +14,12 @@ def add_seasonality_features(df: pd.DataFrame) -> tuple[pd.DataFrame, List[str]]
         df               : DataFrame with new seasonality columns added.
         seasonality_cols : Column names to pass into build_mmm_model().
 
-    Note:
-        Month dummies excluded — too many parameters for 160 training rows.
-        2 Fourier harmonics + trend = 5 seasonality features total.
+        The seasonality columns are 5 : 
+        With k = 1 it creates 2 variables cos & sin w/ 1 waves per year (main trends), 
+        and with k = 2 it creates 2 variables cos & sin w/ 2 waves year (for instance christmas + summer)
+        The 5th variable is t which represents only the evolution of time.
+
+
     """
     df = df.copy()
     seasonality_cols = []
@@ -137,7 +140,7 @@ def apply_saturation(
     """
     Apply Hill saturation to adstocked spend columns.
 
-    Must be called AFTER apply_adstock(). Pipeline:
+    Called AFTER apply_adstock(). Pipeline:
         raw spend → adstock → saturation → regression features
 
     On the TRAINING set, call without ref_maxes — it computes and returns them.

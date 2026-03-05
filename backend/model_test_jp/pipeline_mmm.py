@@ -21,6 +21,7 @@ from model_test_jp.f_metrics import evaluate_holdout
 from model_test_jp.g_overfitting_checks import plot_overfitting_diagnostics, plot_learning_curve
 from model_test_jp.g_overfitting_checks import plot_overfitting_diagnostics, plot_learning_curve
 from model_test_jp.h_mmm_analysis import compute_raw_elasticities
+from model_test_jp.i_vif_checks import compute_and_plot_vif
 
 
 # ============================================================================
@@ -38,10 +39,8 @@ if __name__ == "__main__":
     df_final = _merge_data(df_sales, df_google, df_meta, df_tiktok)
     df_final['sales'] = df_final['sales'] * 100
 
-    # 2. Seasonality features (on full dataset so train/test share same encoding)
     df_final, seasonality_cols = add_seasonality_features(df_final)
 
-    # 3. Time-based split — BEFORE any spend transformations
     df_train_raw, df_test_raw = time_based_split(df_final, train_ratio=0.8)
 
     spend_cols     = ['google_spend', 'meta_spend', 'tiktok_spend']
@@ -140,11 +139,11 @@ if __name__ == "__main__":
     for col, coef in zip(mmm_results['all_feature_cols'], mmm_results['model'].coef_):
         print(f"  {col:40} | {coef:8.4f}")
 
-    # ── Overfitting diagnostic plots ──────────────────────────────────────────
     print("\n" + "=" * 80)
     print("GENERATING DIAGNOSTIC PLOTS")
     print("=" * 80)
 
+    compute_and_plot_vif(df_train, mmm_results['all_feature_cols'])
 
     plot_overfitting_diagnostics(
         mmm_results,

@@ -18,14 +18,12 @@ def build_mmm_model(
 
     Feature matrix = saturated adstocked spend + seasonality controls.
     Elasticities and contributions are computed on spend channels only;
-    seasonality terms are controls, not optimisable budget levers.
 
     Args:
         df               : Training DataFrame (from time_based_split).
         response_col     : Target column name.
         spend_cols       : Original raw spend column names (for elasticity calc).
         saturated_cols   : Transformed spend features (adstocked then saturated).
-                           Must come FIRST — coef_[i] maps to saturated_cols[i].
         seasonality_cols : Seasonality/trend feature columns (appended after spend).
 
     Returns:
