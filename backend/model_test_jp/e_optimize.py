@@ -10,6 +10,8 @@ from model_test_jp.d_model import build_mmm_model
 from model_test_jp.f_metrics import evaluate_holdout
 from model_test_jp.g_overfitting_checks import plot_overfitting_diagnostics, plot_learning_curve
 from model_test_jp.h_mmm_analysis import compute_raw_elasticities
+from sklearn.model_selection import TimeSeriesSplit
+
 
 # ============================================================================
 # DECAY RATE TUNING
@@ -45,19 +47,27 @@ def tune_decay_rates(
     adstocked_cols = [f"{col}_adstocked" for col in spend_cols]
     channel_names  = [col.replace('_spend', '') for col in spend_cols]
 
-    def objective(params: np.ndarray) -> float:
+
+    def objective(params):
         decay_params = dict(zip(channel_names, params))
+        tscv = TimeSeriesSplit(n_splits=5)
+        mapes = []
 
-        df_tr = apply_adstock(df_train_raw, spend_cols, decay_params)
-        df_te = apply_adstock(df_test_raw,  spend_cols, decay_params)
+        for train_idx, val_idx in tscv.split(df_train_raw):
+            fold_train = df_train_raw.iloc[train_idx]
+            fold_val   = df_train_raw.iloc[val_idx]
 
-        df_tr, saturated_cols, ref_maxes = apply_saturation(df_tr, adstocked_cols)
-        df_te, _,              _         = apply_saturation(df_te, adstocked_cols, ref_maxes=ref_maxes)
+            df_tr = apply_adstock(fold_train, spend_cols, decay_params)
+            df_vl = apply_adstock(fold_val,   spend_cols, decay_params)
 
-        results = build_mmm_model(df_tr, response_col, spend_cols, saturated_cols, seasonality_cols)
-        metrics = evaluate_holdout(results, df_te, saturated_cols, seasonality_cols, silent=True)
+            df_tr, saturated_cols, ref_maxes = apply_saturation(df_tr, adstocked_cols)
+            df_vl, _,              _         = apply_saturation(df_vl, adstocked_cols, ref_maxes=ref_maxes)
 
-        return metrics['mape']
+            results = build_mmm_model(df_tr, response_col, spend_cols, saturated_cols, seasonality_cols)
+            metrics = evaluate_holdout(results, df_vl, saturated_cols, seasonality_cols, silent=True)
+            mapes.append(metrics['mape'])
+
+        return np.mean(mapes)
 
     best_mape   = np.inf
     best_params = None
