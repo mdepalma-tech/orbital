@@ -78,5 +78,8 @@ htmlcov/
 # Jupyter
 .ipynb_checkpoints/
 
+# Pipeline tree cache
+.tree_cache.json
+
 # OS generated
 Thumbs.db
