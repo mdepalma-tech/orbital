@@ -249,8 +249,12 @@ function aggregateDaily(
   return { aggregatedData, includedRows };
 }
 
-// Ensure the project row exists (creates it if missing)
-async function ensureProjectExists(projectId: string, userId: string): Promise<void> {
+// Ensure the project row exists (creates it if missing, using project name from first step)
+async function ensureProjectExists(
+  projectId: string,
+  userId: string,
+  projectName: string = "Untitled Analysis"
+): Promise<void> {
   const supabase = getSupabaseServiceClient();
 
   const { data } = await supabase
@@ -263,7 +267,7 @@ async function ensureProjectExists(projectId: string, userId: string): Promise<v
     const { error } = await supabase.from("projects").insert({
       id: projectId,
       user_id: userId,
-      name: "Default Project",
+      name: projectName.trim() || "Untitled Analysis",
       shopify_store_domain: "",
     });
 
@@ -337,6 +341,7 @@ export async function POST(
     const file = formData.get("file") as File | null;
     const timezone = (formData.get("timezone") as string) || "UTC";
     const mode = (formData.get("mode") as string) || "save";
+    const projectName = (formData.get("projectName") as string) || "Untitled Analysis";
 
     if (!file) {
       return NextResponse.json(
@@ -494,8 +499,8 @@ export async function POST(
       );
     }
 
-    // Ensure project exists, then upsert timeseries and persist timezone
-    await ensureProjectExists(projectId, user.id);
+    // Ensure project exists (creates with name from first step if new), then upsert timeseries and persist timezone
+    await ensureProjectExists(projectId, user.id, projectName);
     await upsertTimeseries(projectId, aggregatedData);
     await updateProjectTimezone(projectId, timezone);
 

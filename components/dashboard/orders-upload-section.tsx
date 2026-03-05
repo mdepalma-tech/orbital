@@ -21,7 +21,12 @@ interface ApiResponse {
 
 type Stage = "upload" | "parsing" | "preview" | "saving" | "saved" | "error";
 
-export function OrdersUploadSection({ projectId }: { projectId: string }) {
+interface OrdersUploadSectionProps {
+  projectId: string;
+  projectName?: string;
+}
+
+export function OrdersUploadSection({ projectId, projectName = "Untitled Analysis" }: OrdersUploadSectionProps) {
   const [stage, setStage] = useState<Stage>("upload");
   const [summary, setSummary] = useState<ParseSummary | null>(null);
   const [warnings, setWarnings] = useState<string | null>(null);
@@ -39,6 +44,7 @@ export function OrdersUploadSection({ projectId }: { projectId: string }) {
 
     const formData = new FormData(e.currentTarget);
     formData.set("mode", "preview");
+    formData.set("projectName", projectName);
 
     try {
       const response = await fetch(
@@ -69,6 +75,7 @@ export function OrdersUploadSection({ projectId }: { projectId: string }) {
     formData.set("file", selectedFile);
     formData.set("timezone", timezone);
     formData.set("mode", "save");
+    formData.set("projectName", projectName);
 
     try {
       const response = await fetch(

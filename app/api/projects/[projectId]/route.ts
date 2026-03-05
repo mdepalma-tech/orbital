@@ -61,14 +61,12 @@ export async function PATCH(
 
   const name = body.name.trim();
   const supabaseAdmin = getSupabaseServiceClient();
-  const now = new Date().toISOString();
 
-  // Upsert: insert if not exists, update name if exists
+  // Upsert: insert if not exists, update name if exists (updated_at set by trigger/default)
   const row: Record<string, unknown> = {
     id: projectId,
     user_id: user.id,
     name,
-    updated_at: now,
   };
   // Include shopify_store_domain if column exists (upload routes use it when creating projects)
   const { data, error } = await supabaseAdmin
