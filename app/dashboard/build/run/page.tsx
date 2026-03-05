@@ -249,13 +249,11 @@ function RunPageInner() {
   >([]);
   const [historyWeeks, setHistoryWeeks] = useState(8);
   const forecastDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const WELCOME_CONTENT =
+    "I'm your modeling assistant. I'll walk you through what the engine is doing and explain the diagnostic results as they come in.\n\nThe pipeline is starting now — I'll update you once the data diagnostics are complete.";
+
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
-    {
-      id: "welcome",
-      role: "assistant",
-      content:
-        "I'm your modeling assistant. I'll walk you through what the engine is doing and explain the diagnostic results as they come in.\n\nThe pipeline is starting now — I'll update you once the data diagnostics are complete.",
-    },
+    { id: "welcome", role: "assistant", content: WELCOME_CONTENT },
   ]);
   const [chatInput, setChatInput] = useState("");
 
@@ -271,6 +269,20 @@ function RunPageInner() {
     resultsEndRef.current?.scrollIntoView({ behavior: "smooth" });
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, []);
+
+  const addChatMessage = useCallback(
+    (role: "assistant" | "user", content: string) => {
+      if (!projectId) return;
+      const id = `${role}-${Date.now()}`;
+      setChatMessages((prev) => [...prev, { id, role, content }]);
+      fetch(`/api/projects/${projectId}/run/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ role, content }),
+      }).catch((err) => console.error("Failed to persist chat:", err));
+    },
+    [projectId]
+  );
 
   useEffect(() => {
     scrollToBottom();
@@ -340,7 +352,7 @@ function RunPageInner() {
   }, [projectId, complete, leftTab, runForecast]);
 
   useEffect(() => {
-    if (!projectId || !complete || leftTab !== "forecasting") return;
+    if (!projectId) return;
     const baseUrl = process.env.NEXT_PUBLIC_ORBITAL_BACKEND_URL || "";
     const url = baseUrl
       ? `${baseUrl}/v1/projects/${projectId}/forecast/scenarios`
@@ -353,7 +365,7 @@ function RunPageInner() {
         }
       })
       .catch(() => {});
-  }, [projectId, complete, leftTab]);
+  }, [projectId]);
 
   const handleSpendChange = useCallback(
     (weekIdx: number, col: string, value: number) => {
@@ -389,7 +401,11 @@ function RunPageInner() {
   useEffect(() => {
     if (!projectId) return;
 
-    // Reset state for a fresh stream (handles React Strict Mode double-mount)
+    const ac = new AbortController();
+
+    // Reset state for a fresh stream (handles project switch, React Strict Mode double-mount)
+    // Don't set welcome yet — wait for fetch; if we load existing chat, it already has the intro
+    setChatMessages([]);
     setReasoning([]);
     setResults([]);
     setComplete(null);
@@ -406,14 +422,20 @@ function RunPageInner() {
     diagnosticsSentRef.current = false;
     doneRef.current = false;
 
-    const streamUrl =
-      process.env.NEXT_PUBLIC_ORBITAL_BACKEND_URL
-        ? `${process.env.NEXT_PUBLIC_ORBITAL_BACKEND_URL}/v1/projects/${projectId}/run/stream`
-        : `/api/projects/${projectId}/run/stream`;
-    const es = new EventSource(streamUrl);
+    let es: EventSource | null = null;
+
+    const connectStream = () => {
+      const streamUrl =
+        process.env.NEXT_PUBLIC_ORBITAL_BACKEND_URL
+          ? `${process.env.NEXT_PUBLIC_ORBITAL_BACKEND_URL}/v1/projects/${projectId}/run/stream`
+          : `/api/projects/${projectId}/run/stream`;
+      es = new EventSource(streamUrl);
+      es.onmessage = onStreamMessage;
+      es.onerror = onStreamError;
+    };
 
     let cancelled = false;
-    es.onmessage = (e) => {
+    const onStreamMessage = (e: MessageEvent) => {
       if (cancelled) return;
       let data: PipelineEvent;
       try {
@@ -480,15 +502,10 @@ function RunPageInner() {
             !diagnosticsSentRef.current
           ) {
             diagnosticsSentRef.current = true;
-            setChatMessages((prev) => [
-              ...prev,
-              {
-                id: `diag-fallback-${Date.now()}`,
-                role: "assistant",
-                content:
-                  "The data diagnostics step ran on the server. If the diagnostics card shows a warning above, the event may not have been received by the client. Check your connection and backend logs.",
-              },
-            ]);
+            addChatMessage(
+              "assistant",
+              "The data diagnostics step ran on the server. If the diagnostics card shows a warning above, the event may not have been received by the client. Check your connection and backend logs."
+            );
           }
 
           if (data.id === "diagnostics" && !diagnosticsSentRef.current) {
@@ -496,14 +513,7 @@ function RunPageInner() {
             const explanation = buildDiagnosticsExplanation(
               (data as ResultEvent).metrics
             );
-            setChatMessages((prev) => [
-              ...prev,
-              {
-                id: `diag-${Date.now()}`,
-                role: "assistant",
-                content: explanation,
-              },
-            ]);
+            addChatMessage("assistant", explanation);
           }
           break;
 
@@ -514,7 +524,7 @@ function RunPageInner() {
             )
           );
           setError(data.message);
-          es.close();
+          es?.close();
           break;
 
         case "complete":
@@ -523,45 +533,72 @@ function RunPageInner() {
             prev.map((r) => ({ ...r, status: "done" as const }))
           );
           setComplete(data as CompleteEvent);
-          es.close();
+          es?.close();
           break;
       }
     };
 
-    es.onerror = () => {
+    const onStreamError = () => {
       if (!doneRef.current) {
         setError("Could not connect to modeling engine. Is it running?");
       }
-      es.close();
+      es?.close();
     };
+
+    fetch(`/api/projects/${projectId}/run/chat`, { signal: ac.signal })
+      .then((res) => res.json())
+      .then((data) => {
+        if (ac.signal.aborted) return;
+        const msgs = (data.messages ?? []) as ChatMessage[];
+        if (msgs.length === 0) {
+          setChatMessages([{ id: "welcome", role: "assistant", content: WELCOME_CONTENT }]);
+          fetch(`/api/projects/${projectId}/run/chat`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              role: "assistant",
+              content: WELCOME_CONTENT,
+            }),
+          }).catch((err) => console.error("Failed to persist welcome:", err));
+        } else {
+          setChatMessages(msgs);
+          const hasDiagnostics = msgs.some(
+            (m) =>
+              m.content?.includes("Your data scored") ||
+              m.content?.includes("Data Confidence Band")
+          );
+          if (hasDiagnostics) diagnosticsSentRef.current = true;
+        }
+        if (!ac.signal.aborted) connectStream();
+      })
+      .catch((err) => {
+        if (!ac.signal.aborted) {
+          console.error("Failed to load chat:", err);
+          setChatMessages([{ id: "welcome", role: "assistant", content: WELCOME_CONTENT }]);
+          connectStream();
+        }
+      });
 
     return () => {
       cancelled = true;
-      es.close();
+      ac.abort();
+      es?.close();
     };
-  }, [projectId]);
+  }, [projectId, addChatMessage]);
 
   function handleChatSubmit(e: React.FormEvent) {
     e.preventDefault();
     const text = chatInput.trim();
     if (!text) return;
 
-    setChatMessages((prev) => [
-      ...prev,
-      { id: `user-${Date.now()}`, role: "user", content: text },
-    ]);
+    addChatMessage("user", text);
     setChatInput("");
 
     setTimeout(() => {
-      setChatMessages((prev) => [
-        ...prev,
-        {
-          id: `ai-${Date.now()}`,
-          role: "assistant",
-          content:
-            "I can currently explain the data diagnostics step — including how your data strength score is calculated, what model mode was selected, and what the gating reasons mean. Full conversational AI is coming soon.",
-        },
-      ]);
+      addChatMessage(
+        "assistant",
+        "I can currently explain the data diagnostics step — including how your data strength score is calculated, what model mode was selected, and what the gating reasons mean. Full conversational AI is coming soon."
+      );
     }, 400);
   }
 

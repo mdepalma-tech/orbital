@@ -35,7 +35,7 @@ export function BuildForm({ projectId }: BuildFormProps) {
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      console.error("[BuildForm] PATCH /api/projects failed:", res.status, err);
+      console.error("[BuildForm] PATCH /api/projects failed:", res.status, err?.error ?? err);
     }
     return res.ok;
   };
@@ -79,7 +79,10 @@ export function BuildForm({ projectId }: BuildFormProps) {
             Upload your Shopify orders export to analyze revenue patterns and order trends
           </p>
         </div>
-        <OrdersUploadSection projectId={projectId} />
+        <OrdersUploadSection
+          projectId={projectId}
+          projectName={analysisName.trim() || "Untitled Analysis"}
+        />
       </div>
 
       <div className="p-4 rounded-lg bg-blue-500/10 border border-blue-500/30">
