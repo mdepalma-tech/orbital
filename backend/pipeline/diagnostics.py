@@ -6,6 +6,186 @@ from typing import Dict, List
 
 import numpy as np
 import pandas as pd
+import statsmodels.api as sm
+from scipy.signal import periodogram
+from statsmodels.tsa.stattools import acf
+
+# ---------------------------------------------------------------------------
+# SEASONALITY SELECTION — THREE-STEP PROCESS
+# ---------------------------------------------------------------------------
+#
+# We use three steps in sequence, where each step gates the next:
+#
+#   Step 1 — PERIODOGRAM: find the candidate period
+#   Step 2 — ACF: confirm the candidate period is statistically real
+#   Step 3 — AIC SWEEP: select how many Fourier harmonics (k) to use
+#
+# WHY THREE STEPS INSTEAD OF JUST AIC:
+#
+# AIC alone can select k > 0 even when the improvement is trivial (e.g. AIC
+# drops by 1.2). The ACF test acts as a hard gate — if the series is not
+# significantly autocorrelated at the candidate period, we skip the sweep
+# entirely and set best_k=0. This prevents adding Fourier columns that
+# compete with spend variables for variance they should not explain.
+#
+# WHY FOURIER TERMS (sin/cos) INSTEAD OF MONTH DUMMIES:
+#
+# Month dummies (12 binary columns) assume seasonality jumps sharply between
+# months. Fourier terms model it as a smooth continuous wave, which is more
+# realistic for most revenue patterns and uses far fewer degrees of freedom.
+# k=1 captures one broad annual wave. k=2 adds a faster wave on top of it,
+# allowing the model to represent asymmetric or double-peaked seasonal shapes.
+#
+# WHY RAW REVENUE (not log) FOR THE SWEEP:
+#
+# The AIC sweep detects the shape of seasonality in the raw signal.
+# The log transform in matrix.py is about stabilising variance for regression,
+# not about seasonality detection — applying it here would distort peak
+# amplitudes and could mask or exaggerate patterns.
+
+
+# Minimum AIC improvement over k=0 to justify adding Fourier terms.
+# From information theory: AIC difference < 2 means models are essentially
+# equivalent. We use 2.0 as the threshold to avoid adding columns for
+# marginal gains.
+_MIN_AIC_IMPROVEMENT = 2.0
+
+# ACF confidence band multiplier. The standard 95% band is 2/sqrt(n).
+# Any ACF value beyond this threshold is statistically significant.
+_ACF_CONFIDENCE_MULTIPLIER = 2.0
+
+def _candidate_period(y: pd.Series) -> int:
+    freqs, power = periodogram(y.values)
+
+    #skip index 0(DC component/zero frequency)
+    peak_idx = int(np.argmax(power[1:])) + 1
+    dominant_freq = freqs[peak_idx]
+
+    if dominant_freq > 0:
+        period = round(1.0 / dominant_freq)
+        # Sanity bounds: at least monthly (4w), at most 2 years (104w)
+        if 4 <= period <= 104:
+            return int(period)
+
+    return 52  # default for weekly data
+
+def _acf_confirms_period(y: pd.Series, period: int) -> bool:
+    """
+    STEP 2 — ACF: confirm the candidate period is statistically significant.
+
+    The ACF (autocorrelation function) measures how correlated the series is
+    with a lagged version of itself. A spike at lag=period means the series
+    reliably repeats every `period` weeks — genuine seasonality.
+
+    The 95% confidence band for ACF is 2/sqrt(n). Any value beyond this is
+    statistically significant at the 5% level. Values inside the band could
+    plausibly be noise.
+
+    We compute ACF up to period + 4 lags (a small buffer) to ensure we
+    capture the lag of interest without requesting an excessive number of lags.
+
+    Returns True if seasonality at this period is confirmed, False otherwise.
+    """
+    n = len(y)
+    # Need enough observations to compute ACF at this lag reliably
+    if n < period + 4:
+        return False
+
+    acf_values = acf(y.values, nlags=period + 4, fft=True)
+
+    # Standard 95% confidence threshold: 2 / sqrt(n)
+    threshold = _ACF_CONFIDENCE_MULTIPLIER / np.sqrt(n)
+    acf_at_period = abs(acf_values[period])
+
+    return bool(acf_at_period > threshold)
+
+def _select_fourier_order(
+    y: pd.Series,
+    period: int,
+    max_k: int = 4,
+) -> Dict:
+    """
+    STEP 3 — AIC SWEEP: given a confirmed period, select how many Fourier
+    harmonics (k) best capture the seasonal shape.
+
+    Fits OLS(revenue ~ trend + Fourier terms) for k=0..max_k and picks the
+    k with the lowest AIC, subject to a minimum improvement threshold.
+
+    AIC = n * ln(RSS/n) + 2p
+      - RSS: residual sum of squares (fit quality)
+      - p:   number of parameters (complexity penalty)
+
+    Each additional k adds 2 parameters (sin + cos). AIC only rewards adding
+    them if the RSS reduction is large enough to outweigh the penalty.
+
+    The minimum improvement threshold (_MIN_AIC_IMPROVEMENT = 2.0) means we
+    require AIC to drop by at least 2 over k=0 before accepting any k > 0.
+    This prevents accepting a k=1 solution that barely outperforms k=0.
+
+    Args:
+        y:      Revenue series (raw, not log-transformed).
+        period: Confirmed seasonal period in weeks.
+        max_k:  Maximum harmonics to consider (default 4).
+
+    Returns:
+        {
+            "best_k": int,        # 0 = no seasonality; >0 = harmonics to use
+            "aic_by_k": dict,     # full AIC table for transparency
+            "strength": float,    # total AIC improvement from k=0 to best_k
+        }
+    """
+    t = np.arange(len(y))
+    aic_by_k = {}
+
+    for k in range(0, max_k + 1):
+        # k=0: just trend (intercept + t), no Fourier terms
+        # k=1: trend + sin(2πt/P) + cos(2πt/P)
+        # k=2: above + sin(4πt/P) + cos(4πt/P)  ... and so on
+        cols = [t]
+        for i in range(1, k + 1):
+            cols.append(np.sin(2 * np.pi * i * t / period))
+            cols.append(np.cos(2 * np.pi * i * t / period))
+
+        X = sm.add_constant(np.column_stack(cols))
+        model = sm.OLS(y.values, X).fit()
+        aic_by_k[k] = round(float(model.aic), 4)
+
+    best_k = min(aic_by_k, key=aic_by_k.get)
+
+    # Apply minimum improvement threshold.
+    # If total AIC gain is trivial, treat as no seasonality needed.
+    aic_improvement = aic_by_k[0] - aic_by_k[best_k]
+    if aic_improvement < _MIN_AIC_IMPROVEMENT:
+        best_k = 0
+
+    return {
+        "best_k": best_k,
+        "aic_by_k": aic_by_k,
+        "strength": round(float(aic_improvement), 4),
+    }
+
+def _detect_seasonality(y: pd.Series) -> Dict:
+    period = _candidate_period(y)
+    confirmed = _acf_confirms_period(y, period)
+    if not confirmed:
+        # ACF gate failed — period is not statistically significant.
+        # Return best_k=0: no Fourier terms will be added to X.
+        return {
+            "best_k": 0,
+            "aic_by_k": {},
+            "strength": 0.0,
+            "dominant_period": period,
+            "acf_confirmed": False,
+        }
+
+    # ACF confirmed — run AIC sweep at the validated period
+    result = _select_fourier_order(y, period=period, max_k=4)
+
+    return {
+        **result,
+        "dominant_period": period,
+        "acf_confirmed": True,
+    }
 
 
 def run_diagnostics(
@@ -89,6 +269,17 @@ def run_diagnostics(
             if len(vals) > 0:
                 max_corr = float(np.max(vals))
 
+    if n_obs >= 104:
+        seasonality_result = _detect_seasonality(revenue)
+    else:
+        seasonality_result = {
+            "best_k": 1,
+            "aic_by_k": {},
+            "strength": 0.0,
+            "dominant_period": 52,
+            "acf_confirmed": False,
+        }
+
     # Data Sufficiency Score (0–100, smooth additive)
     # 1. Historical depth: full credit at >= 104 weeks
     depth_score = min(n_obs / 104.0, 1.0) * 25.0
@@ -167,5 +358,6 @@ def run_diagnostics(
         "score": score,
         "model_mode": model_mode,
         "data_confidence_band": data_confidence,
-        "gating_reasons": reasons,
+        "seasonality": seasonality_result,
+        "gating_reasons": reasons
     }
