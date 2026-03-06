@@ -1,11 +1,12 @@
-"""Per-channel adstock alpha selection via grid search."""
+"""Per-channel adstock alpha selection via time-series cross-validation."""
 
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from sklearn.model_selection import TimeSeriesSplit
 
-from pipeline.matrix import build_design_matrix, geometric_adstock
+from pipeline.matrix import build_design_matrix
 from pipeline.modeling import fit_ols
 
 
@@ -15,10 +16,14 @@ def select_adstock_alphas(
     model_mode: str,
     diagnostics: dict,
     alpha_grid: list[float] | None = None,
+    n_splits: int = 3,
 ) -> dict[str, float]:
     """
     For each spend channel, grid-search over alpha_grid to find the adstock
-    decay rate that maximises out-of-sample R² on a time-based 80/20 split.
+    decay rate that maximises cross-validated R² using TimeSeriesSplit.
+
+    Uses time-based cross-validation with n_splits folds. Each fold trains on
+    earlier data and tests on later data, respecting the temporal order.
 
     Each channel is evaluated independently — all other channels are held at
     alpha=0.0 during that channel's sweep. This keeps the search O(C * G)
@@ -30,59 +35,66 @@ def select_adstock_alphas(
     if alpha_grid is None:
         alpha_grid = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
 
-    # Time-based 80/20 split
-    split_idx = int(len(df_weekly) * 0.8)
-    df_train = df_weekly.iloc[:split_idx]
-    df_test = df_weekly.iloc[split_idx:]
-
-    if len(df_test) < 2:
-        # Not enough test data — fall back to no adstock
+    if len(df_weekly) < 2 * n_splits:
+        # Not enough data for n_splits — fall back to no adstock
         return {col: 0.0 for col in spend_cols}
 
+    tscv = TimeSeriesSplit(n_splits=n_splits)
     selected: dict[str, float] = {}
 
     for target_col in spend_cols:
         best_alpha = 0.0
-        best_r2 = -np.inf
+        best_cv_r2 = -np.inf
 
         for alpha in alpha_grid:
             # Build channel_alphas: only the target channel gets the candidate alpha
             channel_alphas = {col: 0.0 for col in spend_cols}
             channel_alphas[target_col] = alpha
 
-            # Build train matrix
-            X_train, y_train, feature_state = build_design_matrix(
-                df_train,
-                spend_cols,
-                model_mode=model_mode,
-                diagnostics=diagnostics,
-                channel_alphas=channel_alphas,
-            )
+            # Collect R² scores across all CV folds
+            fold_r2_scores = []
 
-            # Fit OLS on train
-            result = fit_ols(X_train, y_train)
+            for train_idx, test_idx in tscv.split(df_weekly):
+                df_train_fold = df_weekly.iloc[train_idx]
+                df_test_fold = df_weekly.iloc[test_idx]
 
-            # Build test matrix with feature_state for consistency
-            X_test, y_test, _ = build_design_matrix(
-                df_test,
-                spend_cols,
-                model_mode=model_mode,
-                diagnostics=diagnostics,
-                feature_state=feature_state,
-                channel_alphas=channel_alphas,
-            )
+                # Build train matrix
+                X_train, y_train, feature_state = build_design_matrix(
+                    df_train_fold,
+                    spend_cols,
+                    model_mode=model_mode,
+                    diagnostics=diagnostics,
+                    channel_alphas=channel_alphas,
+                )
 
-            # Predict on test
-            y_pred = result.model.predict(X_test)
-            y_actual = y_test.values
+                # Fit OLS on train fold
+                result = fit_ols(X_train, y_train)
 
-            # Compute OOS R²
-            ss_res = float(np.sum((y_actual - y_pred) ** 2))
-            ss_tot = float(np.sum((y_actual - np.mean(y_actual)) ** 2))
-            r2_oos = (1.0 - ss_res / ss_tot) if ss_tot > 0 else -np.inf
+                # Build test matrix with feature_state for consistency
+                X_test, y_test, _ = build_design_matrix(
+                    df_test_fold,
+                    spend_cols,
+                    model_mode=model_mode,
+                    diagnostics=diagnostics,
+                    feature_state=feature_state,
+                    channel_alphas=channel_alphas,
+                )
 
-            if r2_oos > best_r2:
-                best_r2 = r2_oos
+                # Predict on test fold
+                y_pred = result.model.predict(X_test)
+                y_actual = y_test.values
+
+                # Compute R² for this fold
+                ss_res = float(np.sum((y_actual - y_pred) ** 2))
+                ss_tot = float(np.sum((y_actual - np.mean(y_actual)) ** 2))
+                r2_fold = (1.0 - ss_res / ss_tot) if ss_tot > 0 else -np.inf
+                fold_r2_scores.append(r2_fold)
+
+            # Average R² across all folds
+            cv_r2 = float(np.mean(fold_r2_scores))
+
+            if cv_r2 > best_cv_r2:
+                best_cv_r2 = cv_r2
                 best_alpha = alpha
 
         selected[target_col] = best_alpha
