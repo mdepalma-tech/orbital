@@ -112,6 +112,13 @@ const STATUS_LABELS: Record<string, string> = {
   warn: "Warning",
 };
 
+/** Container colors for Seasonality card: green when detected, amber when insufficient data */
+const SEASONALITY_CONTAINER_COLORS: Record<string, string> = {
+  pass: "text-emerald-400 bg-emerald-500/10 border-emerald-500/30",
+  warn: "text-amber-400 bg-amber-500/10 border-amber-500/30",
+  info: "text-blue-400 bg-blue-500/10 border-blue-500/30",
+};
+
 function formatMetricKey(key: string): string {
   return key
     .replace(/_/g, " ")
@@ -1136,12 +1143,20 @@ function RunPageInner() {
                     return next;
                   });
                 };
+                const isSeasonality = r.id === "seasonality";
+                const containerColors = isSeasonality
+                  ? (SEASONALITY_CONTAINER_COLORS[r.status] || SEASONALITY_CONTAINER_COLORS.info)
+                  : (STATUS_COLORS[r.status] || STATUS_COLORS.info);
+                const seasonalityLabel =
+                  isSeasonality && r.status === "pass"
+                    ? "Detected"
+                    : isSeasonality && r.status === "warn"
+                      ? "Insufficient Data"
+                      : STATUS_LABELS[r.status] || r.status;
                 return (
                 <div
                   key={cardKey}
-                  className={`rounded-xl border backdrop-blur-sm animate-in fade-in slide-in-from-right-4 duration-300 overflow-hidden ${
-                    STATUS_COLORS[r.status] || STATUS_COLORS.info
-                  }`}
+                  className={`rounded-xl border backdrop-blur-sm animate-in fade-in slide-in-from-right-4 duration-300 overflow-hidden ${containerColors}`}
                   style={{ animationDelay: `${i * 50}ms` }}
                 >
                   {/* Card header - clickable to collapse/expand */}
@@ -1153,7 +1168,7 @@ function RunPageInner() {
                     <span className="text-sm font-medium">{r.title}</span>
                     <span className="flex items-center gap-2">
                       <span className="text-[10px] uppercase tracking-wider opacity-70">
-                        {STATUS_LABELS[r.status] || r.status}
+                        {seasonalityLabel}
                       </span>
                       <svg
                         className={`w-4 h-4 text-gray-400 transition-transform duration-200 ${isCollapsed ? "" : "rotate-180"}`}
@@ -1170,6 +1185,61 @@ function RunPageInner() {
                   {/* Metrics - collapsible */}
                   {!isCollapsed && (
                   <div className="px-4 pb-4 pt-0 space-y-1.5">
+                    {isSeasonality ? (
+                      <>
+                        {(r.metrics.insufficient_data as boolean) ? (
+                          <p className="text-[12px] font-light opacity-90">
+                            Seasonality could not be assessed: at least 104 weekly observations are needed. With {formatMetricValue(r.metrics.n_obs)} weeks, the model uses a default seasonal setting.
+                          </p>
+                        ) : (r.metrics.best_k as number) > 0 ? (
+                          <>
+                            <p className="text-[12px] font-light opacity-90 mb-2">
+                              Seasonal pattern detected. Fourier components were added to the design matrix.
+                            </p>
+                            <div className="space-y-1">
+                              <div className="flex justify-between text-[12px]">
+                                <span className="text-gray-400 font-light">Fourier order (k)</span>
+                                <span className="font-mono text-gray-200">{formatMetricValue(r.metrics.best_k)}</span>
+                              </div>
+                              <div className="flex justify-between text-[12px]">
+                                <span className="text-gray-400 font-light">Dominant period</span>
+                                <span className="font-mono text-gray-200">{formatMetricValue(r.metrics.dominant_period)} weeks</span>
+                              </div>
+                              <div className="flex justify-between text-[12px]">
+                                <span className="text-gray-400 font-light">ACF confirmed</span>
+                                <span className="font-mono text-gray-200">{r.metrics.acf_confirmed ? "Yes" : "No"}</span>
+                              </div>
+                              {r.metrics.strength != null && (
+                                <div className="flex justify-between text-[12px]">
+                                  <span className="text-gray-400 font-light">Strength</span>
+                                  <span className="font-mono text-gray-200">{formatMetricValue(r.metrics.strength)}</span>
+                                </div>
+                              )}
+                              {r.metrics.aic_by_k &&
+                                typeof r.metrics.aic_by_k === "object" &&
+                                Object.keys(r.metrics.aic_by_k as object).length > 0 ? (
+                                <div className="mt-1.5 pt-1.5 border-t border-white/5">
+                                  <span className="text-[11px] text-gray-400 uppercase tracking-wider">AIC by k</span>
+                                  <div className="mt-1 space-y-0.5">
+                                    {Object.entries(r.metrics.aic_by_k as Record<string, unknown>).map(([k, v]) => (
+                                      <div key={k} className="flex justify-between text-[12px]">
+                                        <span className="text-gray-400 font-light">k={k}</span>
+                                        <span className="font-mono text-gray-200">{formatMetricValue(v)}</span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              ) : null}
+                            </div>
+                          </>
+                        ) : (
+                          <p className="text-[12px] font-light opacity-90">
+                            No significant seasonality detected. ACF did not confirm a dominant period; no Fourier terms were added.
+                          </p>
+                        )}
+                      </>
+                    ) : (
+                    <>
                     {Object.entries(r.metrics).map(([key, value]) => {
                       if (key === "top_anomalies" && Array.isArray(value)) {
                         if (value.length === 0) return null;
@@ -1259,6 +1329,8 @@ function RunPageInner() {
                         </div>
                       );
                     })}
+                    </>
+                    )}
                   </div>
                   )}
                 </div>

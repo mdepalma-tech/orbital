@@ -400,6 +400,42 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
         "metrics": diag_metrics,
     })
 
+    # ── Seasonality result ──────────────────────────────────────────────
+    seasonality = diagnostics.get("seasonality") or {}
+    n_obs = diagnostics.get("snapshot", {}).get("n_obs", 0)
+    best_k = seasonality.get("best_k", 0)
+    insufficient = n_obs < 104
+    if insufficient:
+        seasonality_status = "warn"
+    elif best_k > 0:
+        seasonality_status = "pass"
+    else:
+        seasonality_status = "info"
+
+    seasonality_metrics = {
+        "best_k": _to_native(seasonality.get("best_k")),
+        "dominant_period": _to_native(seasonality.get("dominant_period")),
+        "acf_confirmed": bool(seasonality.get("acf_confirmed", False)),
+        "strength": _to_native(seasonality.get("strength")),
+        "n_obs": _to_native(n_obs),
+        "insufficient_data": insufficient,
+    }
+    aic_by_k = seasonality.get("aic_by_k")
+    if isinstance(aic_by_k, dict):
+        seasonality_metrics["aic_by_k"] = {
+            str(k): _to_native(v) for k, v in aic_by_k.items()
+        }
+    else:
+        seasonality_metrics["aic_by_k"] = {}
+
+    yield _sse({
+        "type": "result",
+        "id": "seasonality",
+        "title": "Seasonality",
+        "status": seasonality_status,
+        "metrics": seasonality_metrics,
+    })
+
     # ── Step 3: Design matrix ────────────────────────────────────────────
     yield _sse({
         "type": "step",
