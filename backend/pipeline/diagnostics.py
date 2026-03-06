@@ -48,7 +48,7 @@ from statsmodels.tsa.stattools import acf
 # From information theory: AIC difference < 2 means models are essentially
 # equivalent. We use 2.0 as the threshold to avoid adding columns for
 # marginal gains.
-_MIN_AIC_IMPROVEMENT = 2.0
+_MIN_AIC_IMPROVEMENT = 10.0
 
 # ACF confidence band multiplier. The standard 95% band is 2/sqrt(n).
 # Any ACF value beyond this threshold is statistically significant.
@@ -118,9 +118,10 @@ def _select_fourier_order(
     Each additional k adds 2 parameters (sin + cos). AIC only rewards adding
     them if the RSS reduction is large enough to outweigh the penalty.
 
-    The minimum improvement threshold (_MIN_AIC_IMPROVEMENT = 2.0) means we
-    require AIC to drop by at least 2 over k=0 before accepting any k > 0.
-    This prevents accepting a k=1 solution that barely outperforms k=0.
+    We walk forward k=1..max_k and accept each k only if the marginal AIC gain
+    from the previous k meets _MIN_AIC_IMPROVEMENT (10.0). We stop at the first
+    k whose marginal gain is below the threshold. This prevents accepting higher
+    harmonics that only add a trivial improvement over the previous k.
 
     Args:
         y:      Revenue series (raw, not log-transformed).
@@ -150,13 +151,20 @@ def _select_fourier_order(
         model = sm.OLS(y.values, X).fit()
         aic_by_k[k] = round(float(model.aic), 4)
 
-    best_k = min(aic_by_k, key=aic_by_k.get)
+    # Walk forward and accept each k only if the marginal AIC gain
+    # from the previous k meets the minimum threshold.
+    # Stop as soon as a step fails — no point checking higher k.
+    best_k = 0
+    for k in range(1, max_k + 1):
+        marginal_gain = aic_by_k[k - 1] - aic_by_k[k]
+        if marginal_gain >= _MIN_AIC_IMPROVEMENT:
+            best_k = k
+        else:
+            break
 
     # Apply minimum improvement threshold.
     # If total AIC gain is trivial, treat as no seasonality needed.
     aic_improvement = aic_by_k[0] - aic_by_k[best_k]
-    if aic_improvement < _MIN_AIC_IMPROVEMENT:
-        best_k = 0
 
     return {
         "best_k": best_k,
