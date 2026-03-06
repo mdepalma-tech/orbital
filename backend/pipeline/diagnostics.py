@@ -79,11 +79,15 @@ def run_diagnostics(
     # Pairwise correlation (kept for explainability; not used for scoring)
     max_corr = 0.0
     if len(spend_cols) > 1:
-        corr = df_weekly[spend_cols].corr().abs()
-        upper = corr.where(np.triu(np.ones(corr.shape), k=1).astype(bool))
-        vals = upper.stack().values
-        if len(vals) > 0:
-            max_corr = float(vals.max())
+        sub = df_weekly[spend_cols].astype(float)
+        corr = sub.corr()
+        if corr.shape[0] > 1:
+            i_upper, j_upper = np.triu_indices(corr.shape[0], k=1)
+            vals = corr.values[i_upper, j_upper]
+            vals = np.abs(np.asarray(vals, dtype=float))
+            vals = vals[np.isfinite(vals)]
+            if len(vals) > 0:
+                max_corr = float(np.max(vals))
 
     # Data Sufficiency Score (0–100, smooth additive)
     # 1. Historical depth: full credit at >= 104 weeks

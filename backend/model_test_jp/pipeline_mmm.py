@@ -1,3 +1,4 @@
+import argparse
 import pandas as pd
 import numpy as np
 import os
@@ -12,7 +13,7 @@ from sklearn.metrics import mean_absolute_percentage_error, mean_squared_error
 from scipy.optimize import minimize
 
 
-from model_test_jp.a_data_prep import _load_local_series, _clean_data, _merge_data
+from model_test_jp.a_data_prep import _load_local_series, load_from_supabase, _clean_data, _merge_data
 from model_test_jp.b_feature_engineering import add_seasonality_features, apply_adstock, apply_saturation, hill_saturation  
 from model_test_jp.c_train_test_split import time_based_split
 from model_test_jp.d_model import build_mmm_model
@@ -29,12 +30,21 @@ from model_test_jp.i_vif_checks import compute_and_plot_vif
 # ============================================================================
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Marketing Mix Model (MMM) analysis")
+    parser.add_argument("--project-id", type=str, help="Supabase project ID; if omitted, use test_kaggle_data")
+    args = parser.parse_args()
+
     print("=" * 80)
     print("MARKETING MIX MODEL (MMM) ANALYSIS")
     print("=" * 80)
 
     # 1. Load, clean, merge
-    df_sales, df_google, df_meta, df_tiktok = _load_local_series()
+    if args.project_id:
+        print(f"\nLoading data from Supabase project: {args.project_id}")
+        df_sales, df_google, df_meta, df_tiktok = load_from_supabase(args.project_id)
+    else:
+        print("\nLoading data from test_kaggle_data")
+        df_sales, df_google, df_meta, df_tiktok = _load_local_series()
     df_sales, df_google, df_meta, df_tiktok = _clean_data(df_sales, df_google, df_meta, df_tiktok)
     df_final = _merge_data(df_sales, df_google, df_meta, df_tiktok)
     df_final['sales'] = df_final['sales'] * 100

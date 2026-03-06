@@ -604,7 +604,7 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
     use_log_target = config.get("use_log_target", False)
     smearing_factor = 1.0
     if use_log_target:
-        residuals = y.values - result.predicted
+        residuals = result.y.values - result.predicted
         smearing_factor = float(np.mean(np.exp(residuals)))
         smearing_factor = max(smearing_factor, 1e-6)
 

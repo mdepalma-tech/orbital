@@ -131,28 +131,35 @@ function parseCSV(fileContent: string): ShopifyOrderRow[] {
   }
 }
 
-// Convert date to timezone and format as YYYY-MM-DD
-function toLocalDate(dateStr: string, timezone: string): string {
-  const date = new Date(dateStr);
-  
-  if (isNaN(date.getTime())) {
-    throw new Error(`Invalid date: ${dateStr}`);
+// Parse date string to YYYY-MM-DD. No timezone conversion — assumes orders and spend use same dates.
+// Extract date prefix from ISO-like strings (2022-12-25, 2022-12-25T..., 2022-12-25 ...) to avoid
+// new Date() parsing shifts (e.g. "2022-12-25T00:00:00" = local midnight → toISOString = prev day in TZ east of UTC).
+function toDateString(dateStr: string): string {
+  const s = dateStr.trim();
+  if (!s) throw new Error("Empty date string");
+
+  // Any string starting with YYYY-MM-DD: extract date part (matches spend upload logic)
+  if (/^\d{4}-\d{1,2}-\d{1,2}/.test(s)) {
+    const match = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (match) {
+      const month = parseInt(match[2], 10);
+      const day = parseInt(match[3], 10);
+      if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+        return `${match[1]}-${match[2].padStart(2, "0")}-${match[3].padStart(2, "0")}`;
+      }
+    }
   }
 
-  // Format date in the specified timezone
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone: timezone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  });
-
-  const parts = formatter.formatToParts(date);
-  const year = parts.find((p) => p.type === "year")?.value;
-  const month = parts.find((p) => p.type === "month")?.value;
-  const day = parts.find((p) => p.type === "day")?.value;
-
-  return `${year}-${month}-${day}`;
+  const date = new Date(s);
+  if (isNaN(date.getTime())) {
+    const parts = s.match(/(\d{1,2})[/\-](\d{1,2})[/\-](\d{2,4})/);
+    if (parts) {
+      const year = parts[3].length === 2 ? `20${parts[3]}` : parts[3];
+      return `${year}-${parts[1].padStart(2, "0")}-${parts[2].padStart(2, "0")}`;
+    }
+    throw new Error(`Invalid date: ${dateStr}`);
+  }
+  return date.toISOString().slice(0, 10);
 }
 
 function resolveColumn<T extends Record<string, any>>(
@@ -167,10 +174,7 @@ function resolveColumn<T extends Record<string, any>>(
 }
 
 // Aggregate orders by date
-function aggregateDaily(
-  rows: ShopifyOrderRow[],
-  timezone: string
-): { aggregatedData: AggregatedDay[]; includedRows: number } {
+function aggregateDaily(rows: ShopifyOrderRow[]): { aggregatedData: AggregatedDay[]; includedRows: number } {
   const dailyMap = new Map<string, { revenue: number; orders: number }>();
   let includedRows = 0;
 
@@ -193,7 +197,7 @@ function aggregateDaily(
 
     let localDate: string;
     try {
-      localDate = toLocalDate(row.created_at, timezone);
+      localDate = toDateString(row.created_at);
     } catch {
       continue; // Skip invalid dates
     }
@@ -277,18 +281,6 @@ async function ensureProjectExists(
   }
 }
 
-// Persist selected timezone to project for spend upload alignment
-async function updateProjectTimezone(projectId: string, timezone: string): Promise<void> {
-  const supabase = getSupabaseServiceClient();
-  const { error } = await supabase
-    .from("projects")
-    .update({ timezone: timezone || "UTC" })
-    .eq("id", projectId);
-  if (error) {
-    throw new Error(`Failed to update project timezone: ${error.message}`);
-  }
-}
-
 // Upsert time series data to Supabase
 async function upsertTimeseries(
   projectId: string,
@@ -339,7 +331,6 @@ export async function POST(
     // Parse multipart form data
     const formData = await request.formData();
     const file = formData.get("file") as File | null;
-    const timezone = (formData.get("timezone") as string) || "UTC";
     const mode = (formData.get("mode") as string) || "save";
     const projectName = (formData.get("projectName") as string) || "Untitled Analysis";
 
@@ -419,7 +410,7 @@ export async function POST(
     let aggregatedData: AggregatedDay[];
     let includedRows: number;
     try {
-      const result = aggregateDaily(parsedRows, timezone);
+      const result = aggregateDaily(parsedRows);
       aggregatedData = result.aggregatedData;
       includedRows = result.includedRows;
     } catch (error) {
@@ -499,10 +490,9 @@ export async function POST(
       );
     }
 
-    // Ensure project exists (creates with name from first step if new), then upsert timeseries and persist timezone
+    // Ensure project exists (creates with name from first step if new), then upsert timeseries
     await ensureProjectExists(projectId, user.id, projectName);
     await upsertTimeseries(projectId, aggregatedData);
-    await updateProjectTimezone(projectId, timezone);
 
     const allWarnings = validation.warnings || [];
 
