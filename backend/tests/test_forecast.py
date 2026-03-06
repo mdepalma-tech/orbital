@@ -19,7 +19,7 @@ def _make_loaded(
     lags_added=0,
     use_log_target=False,
     use_adstock=False,
-    adstock_alpha=None,
+    channel_alphas=None,
     use_log=False,
     ridge_applied=False,
     smearing_factor=1.0,
@@ -41,7 +41,7 @@ def _make_loaded(
 
     model_config = {
         "use_adstock": use_adstock,
-        "adstock_alpha": adstock_alpha,
+        "channel_alphas": channel_alphas or {},
         "use_log": use_log,
         "use_log_target": use_log_target,
         "smearing_factor": smearing_factor,
@@ -50,6 +50,7 @@ def _make_loaded(
 
     feature_state = {
         "trend_mean": 50.0,
+        "channel_alphas": channel_alphas or {},
         "adstock_last": {"meta_spend": 0.0, "google_spend": 0.0},
         "lag_history": [100.0, 110.0],
     }
@@ -109,7 +110,7 @@ def test_build_X_for_prediction_trend_uses_feature_state():
 @pytest.mark.pure
 def test_build_X_for_prediction_adstock_applied():
     """With use_adstock=True, spend columns should be transformed."""
-    loaded = _make_loaded(use_adstock=True, adstock_alpha=0.5)
+    loaded = _make_loaded(use_adstock=True, channel_alphas={"meta_spend": 0.5, "google_spend": 0.5})
     df = _make_weekly_for_prediction()
     X = build_X_for_prediction(df, loaded.spend_cols, loaded.model_config, loaded.feature_state)
     # Adstocked values should differ from raw values (due to carryover)

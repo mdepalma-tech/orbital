@@ -15,7 +15,7 @@ from pipeline.matrix import get_model_config, geometric_adstock, build_design_ma
 def test_get_model_config_causal_full():
     config = get_model_config("causal_full")
     assert config["use_adstock"] is True
-    assert config["adstock_alpha"] == 0.5
+    assert "adstock_alpha" not in config  # per-channel alphas selected externally
     assert config["use_log"] is True
     assert config["use_log_target"] is True
 
@@ -24,7 +24,7 @@ def test_get_model_config_causal_full():
 def test_get_model_config_causal_cautious():
     config = get_model_config("causal_cautious")
     assert config["use_adstock"] is True
-    assert config["adstock_alpha"] == 0.4
+    assert "adstock_alpha" not in config
     assert config["use_log"] is True
     assert config["use_log_target"] is True
 
@@ -33,7 +33,7 @@ def test_get_model_config_causal_cautious():
 def test_get_model_config_diagnostic_stabilized():
     config = get_model_config("diagnostic_stabilized")
     assert config["use_adstock"] is False
-    assert config["adstock_alpha"] is None
+    assert "adstock_alpha" not in config
     assert config["use_log"] is False
     assert config["use_log_target"] is False
 
@@ -141,13 +141,16 @@ def test_build_design_matrix_feature_state_trend_mean(weekly_data):
 
 @pytest.mark.pure
 def test_build_design_matrix_feature_state_adstock_last(weekly_data):
-    """With adstock enabled, feature_state should contain 'adstock_last' dict."""
+    """With adstock enabled and channel_alphas provided, feature_state should contain 'adstock_last' dict."""
     df_weekly, spend_cols = weekly_data
-    X, y, fs = build_design_matrix(df_weekly, spend_cols, model_mode="causal_full")
+    channel_alphas = {col: 0.5 for col in spend_cols}
+    X, y, fs = build_design_matrix(df_weekly, spend_cols, model_mode="causal_full", channel_alphas=channel_alphas)
     assert "adstock_last" in fs
     assert isinstance(fs["adstock_last"], dict)
     for col in spend_cols:
         assert col in fs["adstock_last"]
+    assert "channel_alphas" in fs
+    assert fs["channel_alphas"] == channel_alphas
 
 
 @pytest.mark.pure
