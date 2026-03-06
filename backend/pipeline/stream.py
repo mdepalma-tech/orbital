@@ -12,6 +12,7 @@ from pipeline.fetch import fetch_project_data
 from pipeline.validate import validate_and_prepare, EPSILON
 from pipeline.aggregate import apply_event_dummies, aggregate_to_weekly
 from pipeline.diagnostics import run_diagnostics
+from pipeline.adstock import select_adstock_alphas
 from pipeline.matrix import build_design_matrix, get_model_config
 from pipeline.modeling import (
     ModelResult,
@@ -247,10 +248,21 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
     diagnostics_train = run_diagnostics(df_train, spend_cols)
     model_mode_train = diagnostics_train["model_mode"]
     config_train = get_model_config(model_mode_train)
+
+    # Per-channel adstock selection on the backtest train fold
+    if config_train["use_adstock"]:
+        channel_alphas_train = select_adstock_alphas(
+            df_train, spend_cols, model_mode_train, diagnostics_train,
+        )
+    else:
+        channel_alphas_train = {col: 0.0 for col in spend_cols}
+
     X_train, y_train, feature_state = build_design_matrix(
         df_train,
         spend_cols,
         model_mode=model_mode_train,
+        diagnostics=diagnostics_train,
+        channel_alphas=channel_alphas_train,
     )
     result_train = run_model(X_train, y_train, spend_cols)
 
@@ -368,10 +380,42 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
     model_mode = diagnostics["model_mode"]
 
     config = get_model_config(model_mode)
+
+    # ── Step 2.8: Adstock alpha selection ────────────────────────────────
+    if config["use_adstock"]:
+        yield _sse({
+            "type": "step",
+            "id": "adstock_selection",
+            "title": "Selecting per-channel adstock alphas",
+            "reasoning": (
+                "Grid-searching over decay rates [0.0 – 0.9] for each spend "
+                "channel independently. For each candidate alpha, we adstock "
+                "only that channel, fit OLS on the first 80% of weeks, and "
+                "evaluate R² on the held-out 20%. The alpha that maximises "
+                "out-of-sample R² is selected for each channel."
+            ),
+        })
+
+        channel_alphas = select_adstock_alphas(
+            df_weekly, spend_cols, model_mode, diagnostics,
+        )
+
+        yield _sse({
+            "type": "result",
+            "id": "adstock_selection",
+            "title": "Adstock Alphas Selected",
+            "status": "pass",
+            "metrics": {
+                "channel_alphas": channel_alphas,
+            },
+        })
+    else:
+        channel_alphas = {col: 0.0 for col in spend_cols}
+
     model_config = {
         "model_mode": model_mode,
         "use_adstock": config["use_adstock"],
-        "adstock_alpha": config["adstock_alpha"],
+        "channel_alphas": channel_alphas,
         "use_log": config["use_log"],
         "use_log_target": config.get("use_log_target", False),
     }
@@ -453,6 +497,7 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
         spend_cols,
         model_mode=model_mode,
         diagnostics=diagnostics,
+        channel_alphas=channel_alphas,
     )
 
     yield _sse({

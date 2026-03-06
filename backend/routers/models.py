@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from schemas.responses import RunModelResponse
+from pipeline.adstock import select_adstock_alphas
 from pipeline.fetch import fetch_project_data
 from pipeline.validate import validate_and_prepare, EPSILON
 from pipeline.aggregate import apply_event_dummies, aggregate_to_weekly
@@ -89,11 +90,11 @@ def forecast(project_id: str, body: ForecastRequest):
         raise HTTPException(status_code=404, detail=str(e))
 
     logger.info(
-        "forecast: loaded model_version=%s spend_cols=%s use_adstock=%s adstock_alpha=%s lags_added=%d",
+        "forecast: loaded model_version=%s spend_cols=%s use_adstock=%s channel_alphas=%s lags_added=%d",
         loaded.version_id,
         loaded.spend_cols,
         loaded.model_config.get("use_adstock", False),
-        loaded.model_config.get("adstock_alpha"),
+        loaded.feature_state.get("channel_alphas") or loaded.model_config.get("channel_alphas"),
         loaded.lags_added,
     )
 
@@ -161,17 +162,19 @@ def forecast(project_id: str, body: ForecastRequest):
 
     # Steady-state adstock when spend is constant: A_ss = spend / (1 - alpha)
     use_adstock = loaded.model_config.get("use_adstock", False)
-    adstock_alpha = loaded.model_config.get("adstock_alpha")
-    if use_adstock and adstock_alpha is not None and adstock_alpha < 1.0:
-        denom = 1.0 - adstock_alpha
-        steady_state = {
-            col: round(baseline_spend.get(col, 0.0) * mult / denom, 2)
-            for col in loaded.spend_cols
-        }
+    channel_alphas = loaded.feature_state.get("channel_alphas") or loaded.model_config.get("channel_alphas") or {}
+    if use_adstock and channel_alphas:
+        steady_state = {}
+        for col in loaded.spend_cols:
+            col_alpha = float(channel_alphas.get(col, 0.0))
+            if col_alpha > 0.0 and col_alpha < 1.0:
+                denom = 1.0 - col_alpha
+                steady_state[col] = round(baseline_spend.get(col, 0.0) * mult / denom, 2)
+            else:
+                steady_state[col] = round(baseline_spend.get(col, 0.0) * mult, 2)
         logger.info(
-            "forecast: steady_state_adstock alpha=%.2f denominator=(1-alpha)=%.4f steady_state=%s",
-            adstock_alpha,
-            denom,
+            "forecast: steady_state_adstock channel_alphas=%s steady_state=%s",
+            channel_alphas,
             steady_state,
         )
 
@@ -427,10 +430,20 @@ def run_pipeline(project_id: str):
     diagnostics_train = run_diagnostics(df_train, spend_cols)
     model_mode_train = diagnostics_train["model_mode"]
     config_train = get_model_config(model_mode_train)
+
+    if config_train["use_adstock"]:
+        channel_alphas_train = select_adstock_alphas(
+            df_train, spend_cols, model_mode_train, diagnostics_train,
+        )
+    else:
+        channel_alphas_train = {col: 0.0 for col in spend_cols}
+
     X_train, y_train, feature_state = build_design_matrix(
         df_train,
         spend_cols,
         model_mode=model_mode_train,
+        diagnostics=diagnostics_train,
+        channel_alphas=channel_alphas_train,
     )
     result_train = run_model(X_train, y_train, spend_cols)
 
@@ -515,10 +528,19 @@ def run_pipeline(project_id: str):
     model_mode = diagnostics["model_mode"]
 
     config = get_model_config(model_mode)
+
+    # Per-channel adstock selection
+    if config["use_adstock"]:
+        channel_alphas = select_adstock_alphas(
+            df_weekly, spend_cols, model_mode, diagnostics,
+        )
+    else:
+        channel_alphas = {col: 0.0 for col in spend_cols}
+
     model_config = {
         "model_mode": model_mode,
         "use_adstock": config["use_adstock"],
-        "adstock_alpha": config["adstock_alpha"],
+        "channel_alphas": channel_alphas,
         "use_log": config["use_log"],
         "use_log_target": config.get("use_log_target", False),
     }
@@ -529,6 +551,7 @@ def run_pipeline(project_id: str):
         spend_cols,
         model_mode=model_mode,
         diagnostics=diagnostics,
+        channel_alphas=channel_alphas,
     )
 
     # Steps 4–9 — Model fitting + decision tree
