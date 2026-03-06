@@ -19,6 +19,44 @@ def _load_local_series() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.D
     return df_sales, df_google, df_meta, df_tiktok
 
 
+def load_from_supabase(project_id: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Load sales and spend from a Supabase project (aggregated to weekly). Same format as _load_local_series."""
+    from pipeline.fetch import fetch_project_data
+    from pipeline.validate import validate_and_prepare
+    from pipeline.aggregate import apply_event_dummies, aggregate_to_weekly
+
+    timeseries, spend, events = fetch_project_data(project_id)
+    daily, events_clean, spend_cols = validate_and_prepare(timeseries, spend, events)
+    daily = apply_event_dummies(daily, events_clean)
+    df_weekly = aggregate_to_weekly(daily, spend_cols)
+
+    for col in ["meta_spend", "google_spend", "tiktok_spend"]:
+        if col not in df_weekly.columns:
+            df_weekly[col] = 0.0
+
+    week_start = df_weekly["week_start"].dt.strftime("%Y-%m-%d")
+
+    df_sales = pd.DataFrame({
+        "timestamp": week_start,
+        "sales": df_weekly["revenue"].values,
+    })
+    df_google = pd.DataFrame({
+        "date": week_start,
+        "spend": df_weekly["google_spend"].values,
+        "campaign": "search",
+    })
+    df_meta = pd.DataFrame({
+        "date": week_start,
+        "spend": df_weekly["meta_spend"].values,
+    })
+    df_tiktok = pd.DataFrame({
+        "date": week_start,
+        "spend": df_weekly["tiktok_spend"].values,
+    })
+
+    return df_sales, df_google, df_meta, df_tiktok
+
+
 # ============================================================================
 # DATA CLEANING
 # ============================================================================

@@ -50,7 +50,20 @@ def get_latest_weekly_row(
     if len(df_weekly) == 0:
         raise ValueError("No weekly data after aggregation")
 
-    last = df_weekly.iloc[-1]
+    # Use last row with non-zero spend; if last week has all zeros (spend ended before timeseries), step back
+    spend_cols_in_df = [c for c in spend_cols if c in df_weekly.columns]
+    last_idx = len(df_weekly) - 1
+    while last_idx >= 0:
+        row = df_weekly.iloc[last_idx]
+        total_spend = sum(float(row.get(c, 0) or 0) for c in spend_cols_in_df)
+        if total_spend > EPSILON:
+            break
+        last_idx -= 1
+
+    if last_idx < 0:
+        raise ValueError("No weekly row with non-zero spend found")
+
+    last = df_weekly.iloc[last_idx]
     week_index = int(last["week_index"])
     baseline_spend = {
         col: float(last[col]) if col in last.index else 0.0
