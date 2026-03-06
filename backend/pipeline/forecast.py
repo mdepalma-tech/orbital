@@ -272,13 +272,14 @@ def build_X_for_prediction(
     """
     use_adstock = model_config.get("use_adstock", False)
     use_log = bool(model_config.get("use_log", False))
-    # Alpha from stored config only — never hardcoded
-    adstock_alpha = model_config.get("adstock_alpha") if use_adstock else None
+    # Per-channel alphas from feature_state; fall back to model_config for
+    # backwards compatibility with older model versions that stored a single alpha.
+    channel_alphas = feature_state.get("channel_alphas") or model_config.get("channel_alphas") or {}
 
     logger.info(
-        "build_X_for_prediction: use_adstock=%s adstock_alpha=%s use_log=%s trend_mean=%s adstock_last=%s",
+        "build_X_for_prediction: use_adstock=%s channel_alphas=%s use_log=%s trend_mean=%s adstock_last=%s",
         use_adstock,
-        adstock_alpha,
+        channel_alphas,
         use_log,
         feature_state.get("trend_mean"),
         feature_state.get("adstock_last"),
@@ -319,25 +320,27 @@ def build_X_for_prediction(
         raw = df_weekly[col].astype(float)
         raw_vals = list(raw.values)
 
-        if use_adstock and adstock_alpha is not None:
+        col_alpha = float(channel_alphas.get(col, 0.0))
+        if use_adstock and col_alpha > 0.0:
             transformed = []
             for i in range(len(raw)):
                 val = raw.iloc[i] if hasattr(raw, "iloc") else raw.iat[i]
                 init_value = float(adstock_last.get(col, 0.0))
                 out, new_last = geometric_adstock(
                     pd.Series([float(val)]),
-                    model_config["adstock_alpha"],
+                    col_alpha,
                     init_value=init_value,
                 )
                 adstock_last[col] = new_last
                 transformed.append(out.iloc[0])
             raw = pd.Series(transformed, index=raw.index)
             logger.debug(
-                "build_X_for_prediction: %s raw_input=%s adstock_init=%s adstocked_output=%s",
+                "build_X_for_prediction: %s raw_input=%s adstock_init=%s adstocked_output=%s alpha=%s",
                 col,
                 raw_vals,
                 feature_state.get("adstock_last", {}).get(col),
                 list(raw.values),
+                col_alpha,
             )
         else:
             logger.debug("build_X_for_prediction: %s raw=%s (no adstock)", col, raw_vals)

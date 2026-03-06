@@ -9,13 +9,19 @@ import pandas as pd
 def get_model_config(model_mode: Optional[str]) -> Dict[str, Any]:
     """
     Deterministic model config from model_mode. No randomness, no tuning.
+
+    Per-channel adstock alphas are now selected externally by
+    select_adstock_alphas() and passed into build_design_matrix via
+    the channel_alphas parameter.  use_adstock is retained as a boolean
+    flag so downstream code (forecast, backtest) knows whether adstock
+    was applied.
     """
     if model_mode == "causal_full":
-        return {"use_adstock": True, "adstock_alpha": 0.5, "use_log": True, "use_log_target": True}
+        return {"use_adstock": True, "use_log": True, "use_log_target": True}
     if model_mode == "causal_cautious":
-        return {"use_adstock": True, "adstock_alpha": 0.4, "use_log": True, "use_log_target": True}
+        return {"use_adstock": True, "use_log": True, "use_log_target": True}
     # diagnostic_stabilized or None
-    return {"use_adstock": False, "adstock_alpha": None, "use_log": False, "use_log_target": False}
+    return {"use_adstock": False, "use_log": False, "use_log_target": False}
 
 
 def geometric_adstock(
@@ -96,6 +102,7 @@ def build_design_matrix(
     model_mode: Optional[str] = None,
     diagnostics: Optional[Dict[str, Any]] = None,
     feature_state: Optional[Dict[str, Any]] = None,
+    channel_alphas: Optional[Dict[str, float]] = None,
 ) -> tuple[pd.DataFrame, pd.Series, Dict[str, Any]]:
     """
     Constructs from weekly-aggregated data:
@@ -179,19 +186,28 @@ def build_design_matrix(
     for col in event_cols:
         X[col] = df_weekly[col].astype(float)
 
-    # Spend columns: raw -> adstock (if enabled) -> log (if enabled)
+    # Resolve per-channel alphas: feature_state (test/forecast) > explicit arg > fallback 0.0
+    if feature_state and "channel_alphas" in feature_state:
+        resolved_alphas = feature_state["channel_alphas"]
+    elif channel_alphas is not None:
+        resolved_alphas = channel_alphas
+    else:
+        resolved_alphas = {}
+
+    # Spend columns: raw -> adstock (per-channel alpha) -> log (if enabled)
     adstock_last_values: Dict[str, float] = {}
     for col in spend_cols:
         raw = df_weekly[col].astype(float)
 
-        if config["use_adstock"] and config["adstock_alpha"] is not None:
+        col_alpha = resolved_alphas.get(col, 0.0)
+        if config["use_adstock"] and col_alpha > 0.0:
             init_value = 0.0
             if feature_state and "adstock_last" in feature_state:
                 init_value = feature_state["adstock_last"].get(col, 0.0)
 
             raw, last_val = geometric_adstock(
                 raw,
-                config["adstock_alpha"],
+                col_alpha,
                 init_value=init_value,
             )
             adstock_last_values[col] = last_val
@@ -216,6 +232,7 @@ def build_design_matrix(
         "trend_mean": trend_mean,
         "seasonality_k": best_k,
         "seasonality_period": dominant_period,
+        "channel_alphas": resolved_alphas,
     }
     if config["use_adstock"]:
         new_feature_state["adstock_last"] = adstock_last_values
