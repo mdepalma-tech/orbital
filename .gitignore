@@ -58,7 +58,7 @@ ENV/
 
 # Python build artifacts
 dist/
-build/
+backend/build/
 *.egg-info/
 
 # Pytest
