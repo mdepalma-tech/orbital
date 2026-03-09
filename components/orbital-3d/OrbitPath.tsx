@@ -71,7 +71,7 @@ export function OrbitPath({ group, phase, isHighlighted }: OrbitPathProps) {
     const drawCount = Math.max(2, Math.floor(progress * (segments + 1)));
     geometry.setDrawRange(0, drawCount);
 
-    const targetOpacity = isHighlighted ? 0.55 : 0.25;
+    const targetOpacity = isHighlighted ? 0.40 : 0.15;
     materialRef.current.opacity = THREE.MathUtils.lerp(
       materialRef.current.opacity,
       targetOpacity * progress,
