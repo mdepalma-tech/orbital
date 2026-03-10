@@ -249,7 +249,7 @@ def _define_modeling_steps() -> List[PipelineNode]:
             inputs=["result (ModelResult)", "spend_cols"],
             outputs=["result (possibly Ridge)"],
             parameters={"VIF_threshold": 10},
-            branch_condition="max(VIF) > 10 -> switch to Ridge(alpha=1.0)",
+            branch_condition="max(VIF) > 10 -> switch to Ridge(alpha via RidgeCV)",
         ),
         PipelineNode(
             step_id="autocorrelation",

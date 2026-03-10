@@ -554,18 +554,22 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
     max_vif = round(max(result.vif_values.values()), 4) if result.vif_values else 0
     vif_passed = max_vif <= 10
 
+    vif_metrics = {
+        "vif_values": {k: round(v, 2) for k, v in result.vif_values.items()},
+        "max_vif": max_vif,
+        "threshold": 10,
+        "ridge_applied": result.ridge_applied,
+    }
+    if result.ridge_applied:
+        vif_metrics["ridge_alpha"] = round(result.ridge_alpha, 4)
+    vif_metrics["decision"] = "No multicollinearity detected" if vif_passed else f"Max VIF = {max_vif} > 10 → switched to Ridge regression"
+
     yield _sse({
         "type": "result",
         "id": "vif",
         "title": "VIF Test",
         "status": "pass" if vif_passed else "action",
-        "metrics": {
-            "vif_values": {k: round(v, 2) for k, v in result.vif_values.items()},
-            "max_vif": max_vif,
-            "threshold": 10,
-            "ridge_applied": result.ridge_applied,
-            "decision": "No multicollinearity detected" if vif_passed else f"Max VIF = {max_vif} > 10 → switched to Ridge regression",
-        },
+        "metrics": vif_metrics,
     })
 
     # ── Step 6: Autocorrelation ──────────────────────────────────────────
@@ -692,7 +696,7 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
     model_config.update({
         "model_type": result.model_type,
         "ridge_applied": result.ridge_applied,
-        "ridge_alpha": 1.0 if result.ridge_applied else None,
+        "ridge_alpha": result.ridge_alpha if result.ridge_applied else None,
         "lags_added": result.lags_added,
         "hac_applied": result.hac_applied,
         "log_transform_post_fit": result.log_transform_applied,

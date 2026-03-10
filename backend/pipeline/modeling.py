@@ -3,6 +3,7 @@ heteroskedasticity, nonlinearity), and final model."""
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict
 
@@ -10,9 +11,12 @@ import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 from sklearn.linear_model import Ridge
+from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 from statsmodels.stats.diagnostic import acorr_ljungbox, het_breuschpagan
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 from statsmodels.stats.stattools import durbin_watson
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -28,6 +32,7 @@ class ModelResult:
     r2: float
     adj_r2: float
     ridge_applied: bool = False
+    ridge_alpha: float = 0.0
     lags_added: int = 0
     log_transform_applied: bool = False
     hac_applied: bool = False
@@ -39,8 +44,35 @@ class ModelResult:
 
 # ── Step 4: Base OLS ────────────────────────────────────────────────────────
 
+def _check_rank(X: pd.DataFrame) -> pd.DataFrame:
+    """Drop rank-deficient columns and warn. Returns cleaned X."""
+    rank = np.linalg.matrix_rank(X.values)
+    if rank >= X.shape[1]:
+        return X
+    # Greedy forward selection: add columns while they increase rank
+    keep_cols: list[str] = []
+    for col in X.columns:
+        candidate = keep_cols + [col]
+        if np.linalg.matrix_rank(X[candidate].values) > len(keep_cols):
+            keep_cols.append(col)
+        if len(keep_cols) == rank:
+            break
+    drop_cols = [c for c in X.columns if c not in keep_cols]
+    logger.warning(
+        "Design matrix is rank-deficient (rank %d < %d columns). "
+        "Dropping redundant columns: %s",
+        rank, X.shape[1], drop_cols,
+    )
+    return X[keep_cols]
+
+
 def fit_ols(X: pd.DataFrame, y: pd.Series) -> ModelResult:
-    model = sm.OLS(y, X).fit()
+    X = _check_rank(X)
+    try:
+        model = sm.OLS(y, X).fit()
+    except (np.linalg.LinAlgError, ValueError) as exc:
+        logger.warning("OLS fit failed (%s), falling back to Ridge", exc)
+        return fit_ridge(X, y)
     resid = model.resid.values
     return ModelResult(
         model_type="ols",
@@ -56,21 +88,105 @@ def fit_ols(X: pd.DataFrame, y: pd.Series) -> ModelResult:
     )
 
 
+_RIDGE_ALPHAS = np.logspace(-2, 4, 50)  # 0.01 → 10 000
+_RIDGE_N_SPLITS = 3
+
+
+def _select_alpha_tscv(
+    X: np.ndarray, y: np.ndarray, alphas: np.ndarray, n_splits: int
+) -> float:
+    """Select Ridge alpha via TimeSeriesSplit CV (respects temporal order)."""
+    n = len(y)
+    min_train = X.shape[1] + 1  # need at least p+1 obs to fit
+    if n < min_train * (n_splits + 1):
+        # Not enough data for time-series CV — fall back to middle of grid
+        logger.warning(
+            "Insufficient data for TimeSeriesSplit alpha selection (n=%d, splits=%d). "
+            "Using median alpha from grid.",
+            n, n_splits,
+        )
+        return float(alphas[len(alphas) // 2])
+
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    best_alpha = alphas[0]
+    best_mse = float("inf")
+
+    for alpha in alphas:
+        ridge = Ridge(alpha=alpha, fit_intercept=True)
+        scores = cross_val_score(
+            ridge, X, y, cv=tscv, scoring="neg_mean_squared_error"
+        )
+        mse = -float(np.mean(scores))
+        if mse < best_mse:
+            best_mse = mse
+            best_alpha = alpha
+
+    return float(best_alpha)
+
+
 def fit_ridge(X: pd.DataFrame, y: pd.Series) -> ModelResult:
     X_no_const = X.drop(columns=["const"], errors="ignore")
-    ridge = Ridge(alpha=1.0, fit_intercept=True)
-    ridge.fit(X_no_const, y)
+    if X_no_const.shape[1] == 0:
+        raise ValueError(
+            "Design matrix has no feature columns after dropping const. "
+            "Check that at least one spend or control variable is present."
+        )
 
-    predicted = ridge.predict(X_no_const)
-    residuals = y.values - predicted
+    # Standardize features so alpha operates on a normalized scale.
+    # Without this, channels with large absolute values (e.g. $500K spend)
+    # receive less relative shrinkage than channels with small values.
+    X_raw = X_no_const.values
+    col_means = X_raw.mean(axis=0)
+    col_stds = X_raw.std(axis=0)
+    col_stds[col_stds == 0] = 1.0  # avoid division by zero for constant cols
+    X_scaled = (X_raw - col_means) / col_stds
+
+    y_vals = y.values
+    y_mean = float(y_vals.mean())
+    y_std = float(y_vals.std())
+    if y_std == 0:
+        y_std = 1.0
+    y_scaled = (y_vals - y_mean) / y_std
+
+    try:
+        best_alpha = _select_alpha_tscv(
+            X_scaled, y_scaled, _RIDGE_ALPHAS, _RIDGE_N_SPLITS
+        )
+    except (np.linalg.LinAlgError, ValueError) as exc:
+        raise ValueError(
+            f"Ridge alpha selection failed on a degenerate design matrix: {exc}. "
+            "Check for duplicate or all-zero columns."
+        ) from exc
+
+    # Fit on standardized data
+    ridge_scaled = Ridge(alpha=best_alpha, fit_intercept=True)
+    ridge_scaled.fit(X_scaled, y_scaled)
+    logger.info("Ridge alpha selected: %.4f via TimeSeriesSplit(n_splits=%d)", best_alpha, _RIDGE_N_SPLITS)
+
+    # Un-standardize coefficients back to original scale:
+    #   β_orig = (y_std / x_std) * β_scaled
+    #   intercept_orig = y_mean + y_std * β0_scaled - Σ(β_orig * x_mean)
+    coef_orig = (y_std / col_stds) * ridge_scaled.coef_
+    intercept_orig = y_mean + y_std * ridge_scaled.intercept_ - float(np.dot(coef_orig, col_means))
+
+    # Refit a Ridge on original scale with the selected alpha so the stored
+    # model object produces correct predictions on raw (unscaled) features.
+    ridge = Ridge(alpha=best_alpha, fit_intercept=True)
+    ridge.fit(X_no_const, y)
+    # Override with the properly un-standardized coefficients
+    ridge.coef_ = coef_orig
+    ridge.intercept_ = intercept_orig
+
+    predicted = ridge.predict(X_no_const.values)
+    residuals = y_vals - predicted
     ss_res = float(np.sum(residuals**2))
-    ss_tot = float(np.sum((y.values - y.mean()) ** 2))
+    ss_tot = float(np.sum((y_vals - y_vals.mean()) ** 2))
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
     n, p = X_no_const.shape
     adj_r2 = 1.0 - (1.0 - r2) * (n - 1) / (n - p - 1) if n > p + 1 else r2
 
-    coefs = pd.Series(ridge.coef_, index=X_no_const.columns)
-    coefs["const"] = float(ridge.intercept_)
+    coefs = pd.Series(coef_orig, index=X_no_const.columns)
+    coefs["const"] = intercept_orig
 
     return ModelResult(
         model_type="ridge",
@@ -84,6 +200,7 @@ def fit_ridge(X: pd.DataFrame, y: pd.Series) -> ModelResult:
         r2=r2,
         adj_r2=adj_r2,
         ridge_applied=True,
+        ridge_alpha=best_alpha,
     )
 
 
@@ -99,9 +216,15 @@ def compute_vif(X: pd.DataFrame, spend_cols: list[str]) -> Dict[str, float]:
     vifs = {}
 
     for i, col in enumerate(X_no_const.columns):
-        vif = float(variance_inflation_factor(values, i))
+        try:
+            vif = float(variance_inflation_factor(values, i))
+        except (np.linalg.LinAlgError, ValueError):
+            vif = float("inf")
+        if not np.isfinite(vif):
+            logger.warning("VIF for '%s' is non-finite (inf/nan) — perfect collinearity likely", col)
+            vif = float("inf")
         if col in spend_cols:
-            vifs[col] = round(vif, 4)
+            vifs[col] = round(vif, 4) if np.isfinite(vif) else float("inf")
 
     return vifs
 
