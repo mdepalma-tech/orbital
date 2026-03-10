@@ -16,6 +16,7 @@ from pipeline.adstock import select_adstock_alphas
 from pipeline.matrix import build_design_matrix, get_model_config
 from pipeline.modeling import (
     ModelResult,
+    compare_alpha_objectives,
     fit_ols,
     check_vif,
     check_autocorrelation,
@@ -562,6 +563,11 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
     }
     if result.ridge_applied:
         vif_metrics["ridge_alpha"] = round(result.ridge_alpha, 4)
+        try:
+            alpha_comp_df = compare_alpha_objectives(result.X, result.y, spend_cols)
+            vif_metrics["alpha_comparison"] = alpha_comp_df.replace({np.nan: None}).to_dict(orient="records")
+        except Exception:
+            vif_metrics["alpha_comparison"] = []
     vif_metrics["decision"] = "No multicollinearity detected" if vif_passed else f"Max VIF = {max_vif} > 10 → switched to Ridge regression"
 
     yield _sse({
@@ -693,7 +699,7 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
         smearing_factor = float(np.mean(np.exp(residuals)))
         smearing_factor = max(smearing_factor, 1e-6)
 
-    model_config.update({
+    model_config_updates: Dict = {
         "model_type": result.model_type,
         "ridge_applied": result.ridge_applied,
         "ridge_alpha": result.ridge_alpha if result.ridge_applied else None,
@@ -703,7 +709,10 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
         "feature_names": list(result.X.columns),
         "use_log_target": use_log_target,
         "smearing_factor": smearing_factor,
-    })
+    }
+    if result.ridge_applied and vif_metrics.get("alpha_comparison"):
+        model_config_updates["alpha_comparison"] = vif_metrics["alpha_comparison"]
+    model_config.update(model_config_updates)
     config_hash = hashlib.sha256(
         json.dumps(model_config, sort_keys=True).encode()
     ).hexdigest()

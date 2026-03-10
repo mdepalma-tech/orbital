@@ -283,6 +283,22 @@
     background: rgba(59, 130, 246, 0.5);
   }
 
+  /* Alpha comparison scrollbar — matches VIF/action card (amber-500) */
+  .alpha-comparison-scroll::-webkit-scrollbar {
+    height: 6px;
+  }
+  .alpha-comparison-scroll::-webkit-scrollbar-track {
+    background: rgba(245, 158, 11, 0.08);
+    border-radius: 3px;
+  }
+  .alpha-comparison-scroll::-webkit-scrollbar-thumb {
+    background: rgba(245, 158, 11, 0.3);
+    border-radius: 3px;
+  }
+  .alpha-comparison-scroll::-webkit-scrollbar-thumb:hover {
+    background: rgba(245, 158, 11, 0.45);
+  }
+
   /* Cursor Glow Effect */
   @media (hover: hover) and (pointer: fine) {
     .feature-card::before {

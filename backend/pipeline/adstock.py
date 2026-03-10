@@ -80,8 +80,12 @@ def select_adstock_alphas(
                     channel_alphas=channel_alphas,
                 )
 
-                # Predict on test fold
-                y_pred = result.model.predict(X_test)
+                # Align test columns to the model's fitted features
+                # (fit_ols may drop rank-deficient columns like all-zero event dummies)
+                fit_cols = result.X.columns
+                X_test_aligned = X_test.reindex(columns=fit_cols, fill_value=0.0)
+
+                y_pred = result.model.predict(X_test_aligned)
                 y_actual = y_test.values
 
                 # Compute R² for this fold
