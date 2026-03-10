@@ -17,12 +17,12 @@ def compute_confidence(
     # Start at High (3), downgrade progressively based on failures
     confidence_level = 3  
 
-    # --- 1. Goodness of Fit (Adjusted R-squared) ---
-    # Adjusted R2 penalizes for having too many variables. 
-    # For MMM, < 0.5 is poor, < 0.7 is acceptable but needs caution.
-    if result.adj_r2 < 0.5:
+    # --- 1. Goodness of Fit (Adjusted R-squared in dollar space) ---
+    # Use dollar_adj_r2 so log-target models are evaluated fairly.
+    adj_r2 = result.dollar_adj_r2 if result.dollar_adj_r2 > 0 else result.adj_r2
+    if adj_r2 < 0.5:
         confidence_level = min(confidence_level, 1)
-    elif result.adj_r2 < 0.7:
+    elif adj_r2 < 0.7:
         confidence_level = min(confidence_level, 2)
 
     # --- 2. Data Volume ---

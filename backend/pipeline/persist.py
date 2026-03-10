@@ -15,9 +15,12 @@ from pipeline.modeling import ModelResult
 
 
 def _to_native(val):
-    """Coerce numpy types to native Python for JSONB compatibility."""
+    """Coerce numpy types to native Python for JSONB compatibility.
+    Also replaces inf/NaN with None so json.dumps never blows up."""
     if hasattr(val, "item"):
-        return val.item()
+        val = val.item()
+    if isinstance(val, float) and (np.isnan(val) or np.isinf(val)):
+        return None
     if isinstance(val, dict):
         return {k: _to_native(v) for k, v in val.items()}
     if isinstance(val, (list, tuple)):
@@ -92,7 +95,7 @@ def persist_results(
     if config_hash is not None:
         version_row["config_hash"] = config_hash
     if model_config is not None:
-        version_row["model_config"] = json.dumps(model_config)
+        version_row["model_config"] = json.dumps(_to_native(model_config))
     if feature_state is not None:
         version_row["feature_state"] = _to_native(feature_state)
 
@@ -100,8 +103,8 @@ def persist_results(
         version_row["data_strength_score"] = diagnostics["score"]
         version_row["model_mode"] = diagnostics["model_mode"]
         version_row["confidence_band"] = diagnostics["data_confidence_band"]
-        version_row["diagnostics_snapshot"] = json.dumps(diagnostics["snapshot"])
-        version_row["gating_reasons"] = json.dumps(diagnostics["gating_reasons"])
+        version_row["diagnostics_snapshot"] = json.dumps(_to_native(diagnostics["snapshot"]))
+        version_row["gating_reasons"] = json.dumps(_to_native(diagnostics["gating_reasons"]))
 
     if oos_metrics is not None:
         # Coerce to native Python types for JSON/PostgREST compatibility
@@ -125,7 +128,7 @@ def persist_results(
             version_row.get("oos_mae"),
         )
 
-    sb.table("model_versions").insert(version_row).execute()
+    sb.table("model_versions").insert(_to_native(version_row)).execute()
 
     # ── model_coefficients ───────────────────────────────────────────────
     coeff_rows = []
@@ -156,15 +159,15 @@ def persist_results(
     corr_matrix = _correlation_matrix(result.X, spend_cols)
 
     sb.table("model_diagnostics").insert(
-        {
+        _to_native({
             "model_version_id": version_id,
             "max_vif": max_vif,
             "ljung_box_p": round(result.ljung_box_p, 8),
             "breusch_pagan_p": round(result.breusch_pagan_p, 8),
             "durbin_watson": round(result.dw_stat, 6),
             "residual_std": round(result.residual_std, 6),
-            "correlation_matrix": json.dumps(corr_matrix),
-        }
+            "correlation_matrix": json.dumps(_to_native(corr_matrix)),
+        })
     ).execute()
 
     # ── model_anomalies ──────────────────────────────────────────────────
