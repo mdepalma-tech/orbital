@@ -1241,6 +1241,8 @@ function RunPageInner() {
                     ) : (
                     <>
                     {Object.entries(r.metrics).map(([key, value]) => {
+                      if (key === "ridge_applied") return null;
+
                       if (key === "top_anomalies" && Array.isArray(value)) {
                         if (value.length === 0) return null;
                         return (
@@ -1283,6 +1285,21 @@ function RunPageInner() {
                             <p className="text-[12px] font-light opacity-90">
                               {formatMetricValue(value)}
                             </p>
+                          </div>
+                        );
+                      }
+
+                      if (key === "ridge_alpha" && typeof value === "number") {
+                        return (
+                          <div key={key} className="mt-1.5 pt-1.5 border-t border-white/5">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-[12px] font-medium text-cyan-300">
+                                Ridge Regularization Active
+                              </span>
+                              <span className="text-[11px] px-2 py-1 rounded bg-cyan-500/20 border border-cyan-500/40 font-mono text-cyan-200">
+                                α = {formatMetricValue(value)}
+                              </span>
+                            </div>
                           </div>
                         );
                       }

@@ -3,16 +3,19 @@ heteroskedasticity, nonlinearity), and final model."""
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict
 
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
-from sklearn.linear_model import Ridge
+from sklearn.linear_model import Ridge, RidgeCV
 from statsmodels.stats.diagnostic import acorr_ljungbox, het_breuschpagan
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 from statsmodels.stats.stattools import durbin_watson
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -28,6 +31,7 @@ class ModelResult:
     r2: float
     adj_r2: float
     ridge_applied: bool = False
+    ridge_alpha: float = 0.0
     lags_added: int = 0
     log_transform_applied: bool = False
     hac_applied: bool = False
@@ -39,8 +43,35 @@ class ModelResult:
 
 # ── Step 4: Base OLS ────────────────────────────────────────────────────────
 
+def _check_rank(X: pd.DataFrame) -> pd.DataFrame:
+    """Drop rank-deficient columns and warn. Returns cleaned X."""
+    rank = np.linalg.matrix_rank(X.values)
+    if rank >= X.shape[1]:
+        return X
+    # Greedy forward selection: add columns while they increase rank
+    keep_cols: list[str] = []
+    for col in X.columns:
+        candidate = keep_cols + [col]
+        if np.linalg.matrix_rank(X[candidate].values) > len(keep_cols):
+            keep_cols.append(col)
+        if len(keep_cols) == rank:
+            break
+    drop_cols = [c for c in X.columns if c not in keep_cols]
+    logger.warning(
+        "Design matrix is rank-deficient (rank %d < %d columns). "
+        "Dropping redundant columns: %s",
+        rank, X.shape[1], drop_cols,
+    )
+    return X[keep_cols]
+
+
 def fit_ols(X: pd.DataFrame, y: pd.Series) -> ModelResult:
-    model = sm.OLS(y, X).fit()
+    X = _check_rank(X)
+    try:
+        model = sm.OLS(y, X).fit()
+    except (np.linalg.LinAlgError, ValueError) as exc:
+        logger.warning("OLS fit failed (%s), falling back to Ridge", exc)
+        return fit_ridge(X, y)
     resid = model.resid.values
     return ModelResult(
         model_type="ols",
@@ -56,10 +87,30 @@ def fit_ols(X: pd.DataFrame, y: pd.Series) -> ModelResult:
     )
 
 
+_RIDGE_ALPHAS = np.logspace(-2, 4, 50)  # 0.01 → 10 000
+
+
 def fit_ridge(X: pd.DataFrame, y: pd.Series) -> ModelResult:
     X_no_const = X.drop(columns=["const"], errors="ignore")
-    ridge = Ridge(alpha=1.0, fit_intercept=True)
+    if X_no_const.shape[1] == 0:
+        raise ValueError(
+            "Design matrix has no feature columns after dropping const. "
+            "Check that at least one spend or control variable is present."
+        )
+    try:
+        ridge_cv = RidgeCV(alphas=_RIDGE_ALPHAS, fit_intercept=True)
+        ridge_cv.fit(X_no_const, y)
+        best_alpha = float(ridge_cv.alpha_)
+    except (np.linalg.LinAlgError, ValueError) as exc:
+        raise ValueError(
+            f"Ridge fit failed on a degenerate design matrix: {exc}. "
+            "Check for duplicate or all-zero columns."
+        ) from exc
+
+    # Refit with final Ridge so .coef_ / .intercept_ are clean
+    ridge = Ridge(alpha=best_alpha, fit_intercept=True)
     ridge.fit(X_no_const, y)
+    logger.info("Ridge alpha selected: %.4f (from grid 0.01–10000)", best_alpha)
 
     predicted = ridge.predict(X_no_const)
     residuals = y.values - predicted
@@ -84,6 +135,7 @@ def fit_ridge(X: pd.DataFrame, y: pd.Series) -> ModelResult:
         r2=r2,
         adj_r2=adj_r2,
         ridge_applied=True,
+        ridge_alpha=best_alpha,
     )
 
 
@@ -99,9 +151,15 @@ def compute_vif(X: pd.DataFrame, spend_cols: list[str]) -> Dict[str, float]:
     vifs = {}
 
     for i, col in enumerate(X_no_const.columns):
-        vif = float(variance_inflation_factor(values, i))
+        try:
+            vif = float(variance_inflation_factor(values, i))
+        except (np.linalg.LinAlgError, ValueError):
+            vif = float("inf")
+        if not np.isfinite(vif):
+            logger.warning("VIF for '%s' is non-finite (inf/nan) — perfect collinearity likely", col)
+            vif = float("inf")
         if col in spend_cols:
-            vifs[col] = round(vif, 4)
+            vifs[col] = round(vif, 4) if np.isfinite(vif) else float("inf")
 
     return vifs
 

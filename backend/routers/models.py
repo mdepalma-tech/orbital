@@ -567,7 +567,7 @@ def run_pipeline(project_id: str):
     model_config.update({
         "model_type": result.model_type,
         "ridge_applied": result.ridge_applied,
-        "ridge_alpha": 1.0 if result.ridge_applied else None,
+        "ridge_alpha": result.ridge_alpha if result.ridge_applied else None,
         "lags_added": result.lags_added,
         "hac_applied": result.hac_applied,
         "log_transform_post_fit": result.log_transform_applied,
