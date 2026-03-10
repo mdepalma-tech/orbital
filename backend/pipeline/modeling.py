@@ -41,6 +41,7 @@ class ModelResult:
     dw_stat: float = 0.0
     ljung_box_p: float = 1.0
     breusch_pagan_p: float = 1.0
+    negative_spend_cols: list = field(default_factory=list)
 
 
 # ── Step 4: Base OLS ────────────────────────────────────────────────────────
@@ -467,30 +468,7 @@ def check_autocorrelation(
     return new_result2
 
 
-# ── Step 7: Heteroskedasticity check ────────────────────────────────────────
-
-def check_heteroskedasticity(result: ModelResult) -> ModelResult:
-    if result.ridge_applied:
-        return result
-
-    try:
-        _, p_val, _, _ = het_breuschpagan(result.residuals, result.X)
-        result.breusch_pagan_p = float(p_val)
-        if p_val < 0.05 and not result.hac_applied:
-            hac_model = sm.OLS(result.y, result.X).fit(
-                cov_type="HAC", cov_kwds={"maxlags": 1}
-            )
-            result.model = hac_model
-            result.coefficients = hac_model.params
-            result.predicted = hac_model.fittedvalues.values
-            result.residuals = hac_model.resid.values
-            result.hac_applied = True
-    except Exception:
-        pass
-    return result
-
-
-# ── Step 8: Nonlinearity check ──────────────────────────────────────────────
+# ── Step 7: Nonlinearity check ───────────────────────────────────────────────
 
 def check_nonlinearity(
     result: ModelResult, spend_cols: list[str]
@@ -513,20 +491,33 @@ def check_nonlinearity(
         test.log_transform_applied = True
         test.ridge_applied = result.ridge_applied
         test.lags_added = result.lags_added
-        test.hac_applied = result.hac_applied
         test.vif_values = result.vif_values
         test.dw_stat = result.dw_stat
-        # If HAC was applied to current model, refit log model with HAC for consistent p-values/bse
-        if result.hac_applied and not result.ridge_applied:
-            hac_model = sm.OLS(test.y, test.X).fit(
-                cov_type="HAC", cov_kwds={"maxlags": 1}
-            )
-            test.model = hac_model
-            test.coefficients = hac_model.params
-            test.predicted = hac_model.fittedvalues.values
-            test.residuals = hac_model.resid.values
         return test
 
+    return result
+
+
+# ── Step 8: Heteroskedasticity check ────────────────────────────────────────
+
+def check_heteroskedasticity(result: ModelResult) -> ModelResult:
+    if result.ridge_applied:
+        return result
+
+    try:
+        _, p_val, _, _ = het_breuschpagan(result.residuals, result.X)
+        result.breusch_pagan_p = float(p_val)
+        if p_val < 0.05 and not result.hac_applied:
+            hac_model = sm.OLS(result.y, result.X).fit(
+                cov_type="HAC", cov_kwds={"maxlags": 1}
+            )
+            result.model = hac_model
+            result.coefficients = hac_model.params
+            result.predicted = hac_model.fittedvalues.values
+            result.residuals = hac_model.resid.values
+            result.hac_applied = True
+    except Exception:
+        pass
     return result
 
 
@@ -544,12 +535,20 @@ def run_model(
     # Step 6: Autocorrelation → maybe lags / HAC
     result = check_autocorrelation(result, spend_cols)
 
-    # Step 7: Heteroskedasticity → maybe HAC
-    result = check_heteroskedasticity(result)
-
-    # Step 8: Nonlinearity → maybe log(spend)
+    # Step 7: Nonlinearity → maybe log(spend)
     result = check_nonlinearity(result, spend_cols)
+
+    # Step 8: Heteroskedasticity → maybe HAC
+    result = check_heteroskedasticity(result)
 
     # Step 9: Final model state is ready
     result.residual_std = float(np.std(result.residuals, ddof=1))
+
+    # Flag negative spend coefficients
+    neg = [c for c in spend_cols
+           if c in result.coefficients.index and float(result.coefficients[c]) < 0]
+    if neg:
+        result.negative_spend_cols = neg
+        logger.warning("Negative spend coefficients detected: %s", neg)
+
     return result
