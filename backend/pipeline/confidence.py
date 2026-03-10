@@ -14,54 +14,65 @@ def compute_confidence(
     Returns 'high', 'medium', or 'low' based on deterministic rules.
     OOS metrics can only downgrade, never upgrade.
     """
-    base_confidence = "high"
+    # Start at High (3), downgrade progressively based on failures
+    confidence_level = 3  
 
-    # Downgrade to medium
-    if result.r2 < 0.3:
-        base_confidence = "medium"
-    if result.vif_values and max(result.vif_values.values()) > 10:
-        base_confidence = "medium"
-    if 60 <= n_obs <= 90:
-        base_confidence = "medium"
+    # --- 1. Goodness of Fit (Adjusted R-squared) ---
+    # Adjusted R2 penalizes for having too many variables. 
+    # For MMM, < 0.5 is poor, < 0.7 is acceptable but needs caution.
+    if result.adj_r2 < 0.5:
+        confidence_level = min(confidence_level, 1)
+    elif result.adj_r2 < 0.7:
+        confidence_level = min(confidence_level, 2)
 
-    # Downgrade to low
-    if result.r2 < 0.15:
-        base_confidence = "low"
-    if n_obs < 90 and result.r2 < 0.3:
-        base_confidence = "low"
+    # --- 2. Data Volume ---
+    # Assuming weekly data: < 52 weeks (1 yr) is highly unstable.
+    # If using daily data, you may want to bump these to 180 and 365.
+    if n_obs < 52:  
+        confidence_level = min(confidence_level, 1)
+    elif n_obs < 104: 
+        confidence_level = min(confidence_level, 2)
 
-    # Check spend variation via VIF as proxy for low variation
+    # --- 3. Collinearity (VIF) ---
     if result.vif_values:
-        min_vif = min(result.vif_values.values())
-        if min_vif < 1.01:
-            base_confidence = "low"
+        max_vif = max(result.vif_values.values())
+        if max_vif > 20: 
+            confidence_level = min(confidence_level, 1) # Severe collinearity
+        elif max_vif > 10:
+            confidence_level = min(confidence_level, 2) # Moderate collinearity
 
+    # --- 4. Residual Diagnostics (The "Under the Hood" checks) ---
+    # Durbin-Watson checks for autocorrelation. ~2.0 is ideal. 
+    # < 1.0 or > 3.0 means the model is likely missing a major seasonal trend.
+    if result.dw_stat:
+        if result.dw_stat < 1.0 or result.dw_stat > 3.0:
+            confidence_level = min(confidence_level, 1)
+        elif result.dw_stat < 1.5 or result.dw_stat > 2.5:
+            confidence_level = min(confidence_level, 2)
+
+    # Ljung-Box / Breusch-Pagan
+    # If p < 0.01, the residuals still have strong patterns or heteroskedasticity 
+    # even after the pipeline tried to apply lags/HAC.
+    if result.ljung_box_p < 0.01 or result.breusch_pagan_p < 0.01:
+        confidence_level = min(confidence_level, 2)
+
+    # --- 5. Out of Sample (OOS) Reality Check ---
     if oos_metrics:
         oos_n_obs = oos_metrics.get("oos_n_obs")
         oos_r2 = oos_metrics.get("oos_r2")
 
-        # Ignore if insufficient OOS data
-        if oos_n_obs is not None and oos_r2 is not None:
+        if oos_n_obs and oos_r2 and oos_n_obs >= 8:
+            # If OOS R2 is negative, the model predicts worse than a flat average line.
+            if oos_r2 < 0.0:
+                confidence_level = min(confidence_level, 1)
+            elif oos_r2 < 0.4:
+                confidence_level = min(confidence_level, 2)
 
-            # Do nothing if fewer than 8 OOS observations
-            if oos_n_obs >= 8:
-
-                # Severe degradation if strongly negative
-                if oos_n_obs >= 16 and oos_r2 < -0.5:
-                    return "low"
-
-                # Moderate degradation
-                if oos_n_obs >= 16 and oos_r2 < 0.0:
-                    if base_confidence == "high":
-                        return "medium"
-                    if base_confidence == "medium":
-                        return "low"
-
-                # Mild degradation for smaller OOS window
-                if 8 <= oos_n_obs < 16 and oos_r2 < -0.5:
-                    if base_confidence == "high":
-                        return "medium"
-                    if base_confidence == "medium":
-                        return "low"
+    # --- Final Translation ---
+    if confidence_level == 3:
+        return "high"
+    if confidence_level == 2:
+        return "medium"
+    return "low"
 
     return base_confidence

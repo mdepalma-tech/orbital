@@ -33,6 +33,7 @@ class ModelResult:
     adj_r2: float
     ridge_applied: bool = False
     ridge_alpha: float = 0.0
+    stability_threshold: float = 0.0
     lags_added: int = 0
     log_transform_applied: bool = False
     hac_applied: bool = False
@@ -66,13 +67,13 @@ def _check_rank(X: pd.DataFrame) -> pd.DataFrame:
     return X[keep_cols]
 
 
-def fit_ols(X: pd.DataFrame, y: pd.Series) -> ModelResult:
+def fit_ols(X: pd.DataFrame, y: pd.Series, spend_cols: list[str] | None = None) -> ModelResult:
     X = _check_rank(X)
     try:
         model = sm.OLS(y, X).fit()
     except (np.linalg.LinAlgError, ValueError) as exc:
         logger.warning("OLS fit failed (%s), falling back to Ridge", exc)
-        return fit_ridge(X, y)
+        return fit_ridge(X, y, spend_cols=spend_cols)
     resid = model.resid.values
     return ModelResult(
         model_type="ols",
@@ -88,8 +89,9 @@ def fit_ols(X: pd.DataFrame, y: pd.Series) -> ModelResult:
     )
 
 
-_RIDGE_ALPHAS = np.logspace(-2, 4, 50)  # 0.01 → 10 000
+_RIDGE_ALPHAS = np.logspace(-2, 4, 200)  # 0.01 → 10 000
 _RIDGE_N_SPLITS = 3
+_STABILITY_THRESHOLD = 0.01
 
 
 def _select_alpha_tscv(
@@ -124,7 +126,56 @@ def _select_alpha_tscv(
     return float(best_alpha)
 
 
-def fit_ridge(X: pd.DataFrame, y: pd.Series) -> ModelResult:
+def _select_alpha_stability(
+    X_scaled: np.ndarray,
+    y: np.ndarray,
+    alphas: np.ndarray,
+    spend_indices: list[int] = None,
+) -> float:
+    n_alphas = len(alphas)
+    n_features = X_scaled.shape[1]
+    coef_matrix = np.empty((n_alphas, n_features))
+
+    for i, a in enumerate(alphas):
+        ridge = Ridge(alpha=a, fit_intercept=True)
+        ridge.fit(X_scaled, y)
+        coef_matrix[i] = ridge.coef_
+
+    # 1. Enforce non-negativity (business logic)
+    valid_mask = np.ones(n_alphas, dtype=bool)
+    if spend_indices:
+        for i in range(n_alphas):
+            if np.any(coef_matrix[i, spend_indices] < -1e-4):
+                valid_mask[i] = False
+
+    # 2. Check stability (rate of change)
+    col_ranges = coef_matrix.max(axis=0) - coef_matrix.min(axis=0)
+    col_ranges[col_ranges == 0] = 1.0
+    coef_norm = coef_matrix / col_ranges
+    deltas = np.abs(np.diff(coef_norm, axis=0))
+    max_delta = deltas.max(axis=1)
+
+    # 3. Find the lowest alpha that is BOTH valid and stable
+    for i in range(n_alphas - 1):
+        if valid_mask[i + 1] and max_delta[i] < _STABILITY_THRESHOLD:
+            selected = float(alphas[i + 1])
+            logger.info("Stability alpha selected: %.4f (valid and stable)", selected)
+            return selected
+
+    # 4. Fallback 1: pick the lowest valid alpha
+    valid_indices = np.where(valid_mask)[0]
+    if len(valid_indices) > 0:
+        selected = float(alphas[valid_indices[0]])
+        logger.warning("No alpha stabilized. Falling back to first valid alpha: %.4f", selected)
+        return selected
+
+    # 5. Fallback 2: return max alpha
+    selected = float(alphas[-1])
+    logger.warning("Ridge could not force positive spend coefficients. Using max alpha: %.4f", selected)
+    return selected
+
+
+def fit_ridge(X: pd.DataFrame, y: pd.Series, spend_cols: list[str] | None = None) -> ModelResult:
     X_no_const = X.drop(columns=["const"], errors="ignore")
     if X_no_const.shape[1] == 0:
         raise ValueError(
@@ -138,42 +189,40 @@ def fit_ridge(X: pd.DataFrame, y: pd.Series) -> ModelResult:
     X_raw = X_no_const.values
     col_means = X_raw.mean(axis=0)
     col_stds = X_raw.std(axis=0)
-    col_stds[col_stds == 0] = 1.0  # avoid division by zero for constant cols
+    col_stds[col_stds == 0] = 1.0
     X_scaled = (X_raw - col_means) / col_stds
 
     y_vals = y.values
-    y_mean = float(y_vals.mean())
-    y_std = float(y_vals.std())
-    if y_std == 0:
-        y_std = 1.0
-    y_scaled = (y_vals - y_mean) / y_std
+
+    spend_indices: list[int] | None = None
+    if spend_cols:
+        col_list = list(X_no_const.columns)
+        spend_indices = [col_list.index(c) for c in spend_cols if c in col_list]
+        if not spend_indices:
+            spend_indices = None
 
     try:
-        best_alpha = _select_alpha_tscv(
-            X_scaled, y_scaled, _RIDGE_ALPHAS, _RIDGE_N_SPLITS
-        )
+        best_alpha = _select_alpha_stability(X_scaled, y_vals, _RIDGE_ALPHAS, spend_indices)
     except (np.linalg.LinAlgError, ValueError) as exc:
         raise ValueError(
             f"Ridge alpha selection failed on a degenerate design matrix: {exc}. "
             "Check for duplicate or all-zero columns."
         ) from exc
 
-    # Fit on standardized data
+    # Fit on standardized X with raw y
     ridge_scaled = Ridge(alpha=best_alpha, fit_intercept=True)
-    ridge_scaled.fit(X_scaled, y_scaled)
-    logger.info("Ridge alpha selected: %.4f via TimeSeriesSplit(n_splits=%d)", best_alpha, _RIDGE_N_SPLITS)
+    ridge_scaled.fit(X_scaled, y_vals)
+    logger.info("Ridge alpha selected: %.4f via stability (threshold=%.4f)", best_alpha, _STABILITY_THRESHOLD)
 
     # Un-standardize coefficients back to original scale:
-    #   β_orig = (y_std / x_std) * β_scaled
-    #   intercept_orig = y_mean + y_std * β0_scaled - Σ(β_orig * x_mean)
-    coef_orig = (y_std / col_stds) * ridge_scaled.coef_
-    intercept_orig = y_mean + y_std * ridge_scaled.intercept_ - float(np.dot(coef_orig, col_means))
+    #   β_orig = (1 / x_std) * β_scaled
+    #   intercept_orig = β0_scaled - Σ(β_orig * x_mean)
+    coef_orig = (1.0 / col_stds) * ridge_scaled.coef_
+    intercept_orig = float(ridge_scaled.intercept_) - float(np.dot(coef_orig, col_means))
 
-    # Refit a Ridge on original scale with the selected alpha so the stored
-    # model object produces correct predictions on raw (unscaled) features.
+    # Construct a Ridge object that predicts on raw (unscaled) features
+    # without a redundant .fit() call.
     ridge = Ridge(alpha=best_alpha, fit_intercept=True)
-    ridge.fit(X_no_const, y)
-    # Override with the properly un-standardized coefficients
     ridge.coef_ = coef_orig
     ridge.intercept_ = intercept_orig
 
@@ -201,28 +250,131 @@ def fit_ridge(X: pd.DataFrame, y: pd.Series) -> ModelResult:
         adj_r2=adj_r2,
         ridge_applied=True,
         ridge_alpha=best_alpha,
+        stability_threshold=_STABILITY_THRESHOLD,
     )
+
+
+def compare_alpha_objectives(
+    X: pd.DataFrame, y: pd.Series, spend_cols: list[str]
+) -> pd.DataFrame:
+    """Compare prediction-optimal vs attribution-stable Ridge alpha side by side.
+
+    Selects two alphas — one minimising holdout MSE (prediction objective) and
+    one maximising coefficient stability (attribution objective) — then fits
+    both and reports R², adjusted R², holdout MSE, and per-channel coefficients
+    for each.  This lets the analyst judge whether the stability alpha degrades
+    predictive quality materially.
+
+    Args:
+        X:          Design matrix (may include a ``const`` column, which is
+                    dropped internally).
+        y:          Target vector in original units.
+        spend_cols: Column names of the spend channels whose coefficients
+                    appear as individual columns in the output.
+
+    Returns:
+        DataFrame with one row per objective and columns ``objective``,
+        ``alpha``, ``r2``, ``adj_r2``, ``holdout_mse``, plus one column per
+        spend channel containing the un-standardised coefficient.
+    """
+    X_no_const = X.drop(columns=["const"], errors="ignore")
+    X_raw = X_no_const.values
+    col_means = X_raw.mean(axis=0)
+    col_stds = X_raw.std(axis=0)
+    col_stds[col_stds == 0] = 1.0
+    X_scaled = (X_raw - col_means) / col_stds
+    y_vals = y.values
+
+    col_list = list(X_no_const.columns)
+    spend_indices = [col_list.index(c) for c in spend_cols if c in col_list] or None
+
+    alpha_pred = _select_alpha_tscv(X_scaled, y_vals, _RIDGE_ALPHAS, _RIDGE_N_SPLITS)
+    alpha_attr = _select_alpha_stability(X_scaled, y_vals, _RIDGE_ALPHAS, spend_indices)
+    logger.info(
+        "compare_alpha_objectives: alpha_pred=%.4f  alpha_attr=%.4f",
+        alpha_pred, alpha_attr,
+    )
+
+    rows: list[dict] = []
+    for label, alpha in [("prediction_mse", alpha_pred), ("attribution_stability", alpha_attr)]:
+        ridge_s = Ridge(alpha=alpha, fit_intercept=True)
+        ridge_s.fit(X_scaled, y_vals)
+
+        coef_orig = (1.0 / col_stds) * ridge_s.coef_
+        intercept_orig = float(ridge_s.intercept_) - float(np.dot(coef_orig, col_means))
+
+        predicted = X_no_const.values @ coef_orig + intercept_orig
+        residuals = y_vals - predicted
+        ss_res = float(np.sum(residuals ** 2))
+        ss_tot = float(np.sum((y_vals - y_vals.mean()) ** 2))
+        r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+        n, p = X_no_const.shape
+        adj_r2 = 1.0 - (1.0 - r2) * (n - 1) / (n - p - 1) if n > p + 1 else r2
+
+        # Holdout MSE on original-scale X and y via TimeSeriesSplit
+        n_obs = len(y_vals)
+        min_train = X_no_const.shape[1] + 1
+        if n_obs >= min_train * (_RIDGE_N_SPLITS + 1):
+            tscv = TimeSeriesSplit(n_splits=_RIDGE_N_SPLITS)
+            fold_mses: list[float] = []
+            for train_idx, test_idx in tscv.split(X_no_const):
+                r_fold = Ridge(alpha=alpha, fit_intercept=True)
+                r_fold.fit(X_no_const.values[train_idx], y_vals[train_idx])
+                y_pred_fold = r_fold.predict(X_no_const.values[test_idx])
+                fold_mses.append(float(np.mean((y_vals[test_idx] - y_pred_fold) ** 2)))
+            holdout_mse = float(np.mean(fold_mses))
+        else:
+            holdout_mse = float("nan")
+
+        row: dict = {
+            "objective": label,
+            "alpha": alpha,
+            "r2": round(r2, 6),
+            "adj_r2": round(adj_r2, 6),
+            "holdout_mse": round(holdout_mse, 4) if np.isfinite(holdout_mse) else None,
+        }
+        col_names = list(X_no_const.columns)
+        for i, col in enumerate(col_names):
+            if col in spend_cols:
+                row[col] = round(float(coef_orig[i]), 6)
+        rows.append(row)
+
+    # Interpreting compare_alpha_objectives output:
+    # - r2 drop < 0.02      → attribution alpha is safe to use
+    # - r2 drop 0.02–0.05   → meaningful trade-off, judgement call
+    # - r2 drop > 0.05      → collinearity too severe for Ridge alone;
+    #                          consider budget-share decomposition or
+    #                          external calibration (geo experiments)
+    # - any spend coef < 0  → red flag regardless of alpha
+
+    return pd.DataFrame(rows)
 
 
 # ── Step 5: VIF check ───────────────────────────────────────────────────────
 
 def compute_vif(X: pd.DataFrame, spend_cols: list[str]) -> Dict[str, float]:
-    if "const" in X.columns:
-        X_no_const = X.drop(columns=["const"])
-    else:
-        X_no_const = X.copy()
+    # statsmodels VIF *requires* a constant to calculate centered R-squared.
+    X_vif = X.copy()
+    if "const" not in X_vif.columns:
+        X_vif = sm.add_constant(X_vif)
 
-    values = X_no_const.values
+    values = X_vif.values
     vifs = {}
+    col_names = list(X_vif.columns)
 
-    for i, col in enumerate(X_no_const.columns):
+    for i, col in enumerate(col_names):
+        if col == "const":
+            continue
+
         try:
             vif = float(variance_inflation_factor(values, i))
         except (np.linalg.LinAlgError, ValueError):
             vif = float("inf")
+
         if not np.isfinite(vif):
             logger.warning("VIF for '%s' is non-finite (inf/nan) — perfect collinearity likely", col)
             vif = float("inf")
+
         if col in spend_cols:
             vifs[col] = round(vif, 4) if np.isfinite(vif) else float("inf")
 
@@ -233,7 +385,7 @@ def check_vif(result: ModelResult, spend_cols: list[str]) -> ModelResult:
     vifs = compute_vif(result.X, spend_cols)
     result.vif_values = vifs
     if vifs and max(vifs.values()) > 10:
-        ridge_result = fit_ridge(result.X, result.y)
+        ridge_result = fit_ridge(result.X, result.y, spend_cols=spend_cols)
         ridge_result.vif_values = vifs
         return ridge_result
     return result
@@ -249,10 +401,10 @@ def _ljungbox_pvalue(residuals: np.ndarray, lags: int = 5) -> float:
         return 1.0
 
 
-def _refit(X: pd.DataFrame, y: pd.Series, use_ridge: bool) -> ModelResult:
+def _refit(X: pd.DataFrame, y: pd.Series, use_ridge: bool, spend_cols: list[str] | None = None) -> ModelResult:
     if use_ridge:
-        return fit_ridge(X, y)
-    return fit_ols(X, y)
+        return fit_ridge(X, y, spend_cols=spend_cols)
+    return fit_ols(X, y, spend_cols=spend_cols)
 
 
 def check_autocorrelation(
@@ -273,7 +425,7 @@ def check_autocorrelation(
     X = X.loc[mask]
     y = y.loc[mask]
 
-    new_result = _refit(X, y, use_ridge)
+    new_result = _refit(X, y, use_ridge, spend_cols=spend_cols)
     new_result.lags_added = 1
     new_result.ridge_applied = use_ridge
     new_result.vif_values = result.vif_values
@@ -291,7 +443,7 @@ def check_autocorrelation(
     X2 = X2.loc[mask2]
     y2 = y2.loc[mask2]
 
-    new_result2 = _refit(X2, y2, use_ridge)
+    new_result2 = _refit(X2, y2, use_ridge, spend_cols=spend_cols)
     new_result2.lags_added = 2
     new_result2.ridge_applied = use_ridge
     new_result2.vif_values = result.vif_values
@@ -353,9 +505,9 @@ def check_nonlinearity(
         X_log[col] = np.log1p(X_log[col])
 
     if result.ridge_applied:
-        test = fit_ridge(X_log, result.y)
+        test = fit_ridge(X_log, result.y, spend_cols=spend_cols)
     else:
-        test = fit_ols(X_log, result.y)
+        test = fit_ols(X_log, result.y, spend_cols=spend_cols)
 
     if test.r2 > result.r2 + 0.01:
         test.log_transform_applied = True
@@ -384,7 +536,7 @@ def run_model(
     X: pd.DataFrame, y: pd.Series, spend_cols: list[str]
 ) -> ModelResult:
     # Step 4: Base OLS
-    result = fit_ols(X, y)
+    result = fit_ols(X, y, spend_cols=spend_cols)
 
     # Step 5: VIF → maybe Ridge
     result = check_vif(result, spend_cols)

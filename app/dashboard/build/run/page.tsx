@@ -1242,6 +1242,7 @@ function RunPageInner() {
                     <>
                     {Object.entries(r.metrics).map(([key, value]) => {
                       if (key === "ridge_applied") return null;
+                      if (key === "alpha_comparison" && !(Array.isArray(value) && value.length > 0)) return null;
 
                       if (key === "top_anomalies" && Array.isArray(value)) {
                         if (value.length === 0) return null;
@@ -1300,6 +1301,55 @@ function RunPageInner() {
                                 α = {formatMetricValue(value)}
                               </span>
                             </div>
+                          </div>
+                        );
+                      }
+
+                      if (key === "alpha_comparison" && Array.isArray(value) && value.length > 0) {
+                        const rows = value as Array<Record<string, unknown>>;
+                        const spendCols = Object.keys(rows[0]).filter(
+                          (k) => !["objective", "alpha", "r2", "adj_r2", "holdout_mse"].includes(k)
+                        );
+                        return (
+                          <div key={key} className="mt-2 pt-2 border-t border-white/5">
+                            <span className="text-[11px] text-gray-400 uppercase tracking-wider">
+                              Alpha Objectives Comparison
+                            </span>
+                            <div className="mt-2 overflow-x-auto alpha-comparison-scroll">
+                              <table className="w-full text-[11px]">
+                                <thead>
+                                  <tr className="text-left text-gray-400 font-light">
+                                    <th className="pb-1 pr-2">Objective</th>
+                                    <th className="pb-1 pr-2">α</th>
+                                    <th className="pb-1 pr-2">R²</th>
+                                    <th className="pb-1 pr-2">Holdout MSE</th>
+                                    {spendCols.map((c) => (
+                                      <th key={c} className="pb-1 pr-2">{c}</th>
+                                    ))}
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {rows.map((row, ri) => (
+                                    <tr key={ri} className="text-gray-200">
+                                      <td className="py-0.5 pr-2 font-mono">
+                                        {String(row.objective).replace(/_/g, " ")}
+                                      </td>
+                                      <td className="py-0.5 pr-2 font-mono">{formatMetricValue(row.alpha)}</td>
+                                      <td className="py-0.5 pr-2 font-mono">{formatMetricValue(row.r2)}</td>
+                                      <td className="py-0.5 pr-2 font-mono">{formatMetricValue(row.holdout_mse)}</td>
+                                      {spendCols.map((col) => (
+                                        <td key={col} className="py-0.5 pr-2 font-mono">
+                                          {formatMetricValue(row[col])}
+                                        </td>
+                                      ))}
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                            <p className="mt-1.5 text-[10px] text-gray-500 font-light">
+                              Prediction MSE: optimises holdout error. Attribution stability: optimises coefficient consistency.
+                            </p>
                           </div>
                         );
                       }
