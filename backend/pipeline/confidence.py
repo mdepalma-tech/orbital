@@ -56,7 +56,11 @@ def compute_confidence(
     if result.ljung_box_p < 0.01 or result.breusch_pagan_p < 0.01:
         confidence_level = min(confidence_level, 2)
 
-    # --- 5. Out of Sample (OOS) Reality Check ---
+    # --- 5. Negative Spend Coefficients ---
+    if result.negative_spend_cols:
+        confidence_level = min(confidence_level, 1)
+
+    # --- 6. Out of Sample (OOS) Reality Check ---
     if oos_metrics:
         oos_n_obs = oos_metrics.get("oos_n_obs")
         oos_r2 = oos_metrics.get("oos_r2")
@@ -74,5 +78,3 @@ def compute_confidence(
     if confidence_level == 2:
         return "medium"
     return "low"
-
-    return base_confidence

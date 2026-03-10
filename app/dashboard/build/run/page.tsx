@@ -1110,6 +1110,18 @@ function RunPageInner() {
                           </>
                         )}
                       </div>
+                      {Array.isArray(complete.summary.negative_spend_warning) && (complete.summary.negative_spend_warning as string[]).length > 0 && (
+                        <div className="mt-3 rounded bg-red-500/10 border border-red-500/30 px-3 py-2">
+                          <p className="text-red-400 text-[12px] font-medium mb-1">Negative Spend Coefficients</p>
+                          {(complete.summary.negative_spend_warning as string[]).map((col) => (
+                            <div key={col} className="flex items-center gap-1.5 text-[11px]">
+                              <span className="w-1.5 h-1.5 rounded-full bg-red-400 shrink-0" />
+                              <span className="text-red-300 font-mono">{col}</span>
+                            </div>
+                          ))}
+                          <p className="text-[10px] text-red-400/60 mt-1 font-light">Model suggests more spend on these channels decreases revenue. Review data or consider removing.</p>
+                        </div>
+                      )}
                       <div className="mt-4 pt-4 border-t border-white/10">
                         <button
                           onClick={() => router.push("/dashboard")}
@@ -1301,6 +1313,60 @@ function RunPageInner() {
                                 α = {formatMetricValue(value)}
                               </span>
                             </div>
+                          </div>
+                        );
+                      }
+
+                      if (key === "negative_spend_warning" && Array.isArray(value) && value.length > 0) {
+                        return (
+                          <div key={key} className="mt-1.5 pt-1.5 border-t border-white/5">
+                            <div className="flex items-start gap-2 rounded bg-red-500/10 border border-red-500/30 px-2.5 py-2">
+                              <span className="text-red-400 text-[12px] font-medium shrink-0">Negative Spend Coefficients</span>
+                            </div>
+                            <div className="mt-1.5 space-y-0.5">
+                              {(value as string[]).map((col) => (
+                                <div key={col} className="flex items-center gap-1.5 text-[11px]">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-red-400 shrink-0" />
+                                  <span className="text-red-300 font-mono">{col}</span>
+                                  <span className="text-gray-500 font-light">— model suggests more spend decreases revenue</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      }
+
+                      if (key === "ridge_coefficients" && typeof value === "object" && value !== null) {
+                        return (
+                          <div key={key} className="mt-1.5">
+                            <span className="text-[11px] text-gray-400 uppercase tracking-wider">
+                              Ridge Coefficients
+                            </span>
+                            <div className="mt-1 space-y-1">
+                              {Object.entries(value as Record<string, number>).map(
+                                ([col, coef]) => (
+                                  <div
+                                    key={col}
+                                    className="flex justify-between text-[12px]"
+                                  >
+                                    <span className="text-gray-400 font-light">
+                                      {formatMetricKey(col)}
+                                    </span>
+                                    <span className={`font-mono ${Number(coef) < 0 ? "text-red-400" : "text-gray-200"}`}>
+                                      {formatMetricValue(coef)}
+                                    </span>
+                                  </div>
+                                )
+                              )}
+                            </div>
+                          </div>
+                        );
+                      }
+
+                      if (key === "vif_note" && typeof value === "string") {
+                        return (
+                          <div key={key} className="mt-1 text-[10px] text-gray-500 font-light italic">
+                            VIF values are {value}
                           </div>
                         );
                       }
