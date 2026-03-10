@@ -271,7 +271,7 @@ def build_X_for_prediction(
     df_weekly must have: week_index, and columns for spend_cols and optional event_*.
     """
     use_adstock = model_config.get("use_adstock", False)
-    use_log = bool(model_config.get("use_log", False))
+    use_log = bool(model_config.get("log_transform_post_fit", model_config.get("use_log", False)))
     # Per-channel alphas from feature_state; fall back to model_config for
     # backwards compatibility with older model versions that stored a single alpha.
     channel_alphas = feature_state.get("channel_alphas") or model_config.get("channel_alphas") or {}

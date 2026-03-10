@@ -17,9 +17,9 @@ def get_model_config(model_mode: Optional[str]) -> Dict[str, Any]:
     was applied.
     """
     if model_mode == "causal_full":
-        return {"use_adstock": True, "use_log": True, "use_log_target": True}
+        return {"use_adstock": True, "use_log": False, "use_log_target": False}
     if model_mode == "causal_cautious":
-        return {"use_adstock": True, "use_log": True, "use_log_target": True}
+        return {"use_adstock": True, "use_log": False, "use_log_target": False}
     # diagnostic_stabilized or None
     return {"use_adstock": False, "use_log": False, "use_log_target": False}
 

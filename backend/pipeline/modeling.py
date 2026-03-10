@@ -36,6 +36,9 @@ class ModelResult:
     stability_threshold: float = 0.0
     lags_added: int = 0
     log_transform_applied: bool = False
+    log_target_applied: bool = False
+    dollar_r2: float = 0.0
+    dollar_adj_r2: float = 0.0
     hac_applied: bool = False
     vif_values: Dict[str, float] = field(default_factory=dict)
     dw_stat: float = 0.0
@@ -468,34 +471,131 @@ def check_autocorrelation(
     return new_result2
 
 
-# ── Step 7: Nonlinearity check ───────────────────────────────────────────────
+# ── Step 7: Nonlinearity check (3-way race) ──────────────────────────────────
+
+def _compute_dollar_r2(
+    y_original: np.ndarray,
+    predicted_log: np.ndarray,
+    smearing: float,
+) -> tuple[float, np.ndarray]:
+    """Back-transform log-space predictions to dollars via Duan's smearing,
+    then compute R² in dollar space for fair comparison with linear models."""
+    preds_dollar = np.maximum(smearing * np.exp(predicted_log) - 1.0, 0.0)
+    ss_res = float(np.sum((y_original - preds_dollar) ** 2))
+    ss_tot = float(np.sum((y_original - y_original.mean()) ** 2))
+    r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+    return r2, preds_dollar
+
+
+def _inherit_flags(source: ModelResult, target: ModelResult) -> None:
+    """Copy diagnostic flags from source result to target so downstream
+    steps see the correct state after a refit."""
+    target.ridge_applied = source.ridge_applied
+    target.lags_added = source.lags_added
+    target.vif_values = source.vif_values
+    target.dw_stat = source.dw_stat
+    target.ljung_box_p = source.ljung_box_p
+    target.hac_applied = source.hac_applied
+
 
 def check_nonlinearity(
-    result: ModelResult, spend_cols: list[str]
+    result: ModelResult,
+    spend_cols: list[str],
+    force_log_spend: bool | None = None,
+    force_log_target: bool | None = None,
 ) -> ModelResult:
+    """3-way race: Base vs Linear-Log vs Log-Log, compared in dollar space.
+
+    If force_log_spend / force_log_target are set (functional form lock from
+    backtest train fold), skip the race and fit the requested form directly.
+    """
     present = [c for c in spend_cols if c in result.X.columns]
     if not present:
+        result.dollar_r2 = result.r2
+        result.dollar_adj_r2 = result.adj_r2
         return result
 
-    # Compare R² with log-transformed spend vs current
-    X_log = result.X.copy()
+    use_ridge = result.ridge_applied
+    y_original = result.y.values  # always in dollar space (no log target yet)
+
+    # --- Force mode (functional form lock from backtest train fold) ---
+    if force_log_spend is not None or force_log_target is not None:
+        want_log_spend = bool(force_log_spend)
+        want_log_target = bool(force_log_target)
+
+        X_f = result.X.copy()
+        y_f = result.y.copy()
+
+        if want_log_spend:
+            for col in present:
+                X_f[col] = np.log1p(np.maximum(X_f[col], 0.0))
+        if want_log_target:
+            y_f = np.log1p(np.maximum(y_f, 0.0))
+
+        forced = fit_ridge(X_f, y_f, spend_cols=spend_cols) if use_ridge else fit_ols(X_f, y_f, spend_cols=spend_cols)
+        _inherit_flags(result, forced)
+        forced.log_transform_applied = want_log_spend
+        forced.log_target_applied = want_log_target
+
+        if want_log_target:
+            smearing = max(float(np.mean(np.exp(forced.y.values - forced.predicted))), 1e-6)
+            dollar_r2, _ = _compute_dollar_r2(y_original, forced.predicted, smearing)
+            n, p = forced.X.shape
+            forced.dollar_r2 = dollar_r2
+            forced.dollar_adj_r2 = 1.0 - (1.0 - dollar_r2) * (n - 1) / (n - p - 1) if n > p + 1 else dollar_r2
+        else:
+            forced.dollar_r2 = forced.r2
+            forced.dollar_adj_r2 = forced.adj_r2
+
+        return forced
+
+    # --- 3-way race ---
+    # Candidate 1: Base (current result, linear-linear)
+    best = result
+    best.dollar_r2 = result.r2
+    best.dollar_adj_r2 = result.adj_r2
+    best_label = "base"
+
+    # Candidate 2: Linear-Log (log spend, linear target)
+    X_log_spend = result.X.copy()
     for col in present:
-        X_log[col] = np.log1p(X_log[col])
+        X_log_spend[col] = np.log1p(np.maximum(X_log_spend[col], 0.0))
 
-    if result.ridge_applied:
-        test = fit_ridge(X_log, result.y, spend_cols=spend_cols)
-    else:
-        test = fit_ols(X_log, result.y, spend_cols=spend_cols)
+    cand_ls = fit_ridge(X_log_spend, result.y, spend_cols=spend_cols) if use_ridge else fit_ols(X_log_spend, result.y, spend_cols=spend_cols)
+    _inherit_flags(result, cand_ls)
+    cand_ls.log_transform_applied = True
+    cand_ls.dollar_r2 = cand_ls.r2
+    cand_ls.dollar_adj_r2 = cand_ls.adj_r2
 
-    if test.r2 > result.r2 + 0.01:
-        test.log_transform_applied = True
-        test.ridge_applied = result.ridge_applied
-        test.lags_added = result.lags_added
-        test.vif_values = result.vif_values
-        test.dw_stat = result.dw_stat
-        return test
+    if cand_ls.dollar_r2 > best.dollar_r2 + 0.01:
+        best = cand_ls
+        best_label = "linear-log"
 
-    return result
+    # Candidate 3: Log-Log (log spend, log target)
+    y_log = np.log1p(np.maximum(result.y, 0.0))
+    cand_ll = fit_ridge(X_log_spend, y_log, spend_cols=spend_cols) if use_ridge else fit_ols(X_log_spend, y_log, spend_cols=spend_cols)
+    _inherit_flags(result, cand_ll)
+    cand_ll.log_transform_applied = True
+    cand_ll.log_target_applied = True
+
+    # Evaluate log-log in dollar space via Duan's smearing
+    residuals_ll = cand_ll.y.values - cand_ll.predicted
+    smearing_ll = max(float(np.mean(np.exp(residuals_ll))), 1e-6)
+    dollar_r2_ll, _ = _compute_dollar_r2(y_original, cand_ll.predicted, smearing_ll)
+    n, p = cand_ll.X.shape
+    cand_ll.dollar_r2 = dollar_r2_ll
+    cand_ll.dollar_adj_r2 = 1.0 - (1.0 - dollar_r2_ll) * (n - 1) / (n - p - 1) if n > p + 1 else dollar_r2_ll
+
+    if cand_ll.dollar_r2 > best.dollar_r2 + 0.01:
+        best = cand_ll
+        best_label = "log-log"
+
+    logger.info(
+        "Nonlinearity 3-way race: base=%.4f linear-log=%.4f log-log=%.4f (dollar R²) → winner=%s",
+        result.r2, cand_ls.dollar_r2, cand_ll.dollar_r2, best_label,
+    )
+
+    return best
 
 
 # ── Step 8: Heteroskedasticity check ────────────────────────────────────────

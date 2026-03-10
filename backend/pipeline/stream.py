@@ -268,7 +268,7 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
     result_train = run_model(X_train, y_train, spend_cols)
 
     # Smearing from training fold only (result_train fit on df_train)
-    use_log_target_train = config_train.get("use_log_target", False)
+    use_log_target_train = getattr(result_train, "log_target_applied", False)
     smearing_train = 1.0
     if use_log_target_train:
         residuals_train = result_train.y.values - result_train.predicted
@@ -632,8 +632,7 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
         },
     })
 
-    # ── Step 7: Nonlinearity ─────────────────────────────────────────────
-    spend_already_logged = config.get("use_log", False)
+    # ── Step 7: Nonlinearity (3-way race) ──────────────────────────────
     pre_r2 = result.r2
 
     yield _sse({
@@ -641,30 +640,34 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
         "id": "nonlinearity",
         "title": "Testing nonlinearity",
         "reasoning": (
-            "Comparing the current model's R² with a log-transformed spend model. "
-            "If log(spend+1) improves R² by more than 0.01, we adopt the log transform "
-            "to capture diminishing returns. This runs before heteroskedasticity "
-            "because log transforms often naturally cure variance instability."
+            "Running a 3-way race: Base (linear) vs Linear-Log (log spend) vs "
+            "Log-Log (log spend + log target). All candidates are compared in "
+            "dollar-space R² using Duan's smearing estimator for fair comparison. "
+            "Winner must beat current best by > 0.01."
         ),
     })
 
-    if spend_already_logged:
-        log_applied = False
-        r2_diff = 0.0
-        nl_decision = "Skipped (spend columns already log-transformed by model mode)"
+    result = check_nonlinearity(result, spend_cols)
+    log_applied = result.log_transform_applied
+    log_target = getattr(result, "log_target_applied", False)
+    r2_diff = round(result.dollar_r2 - pre_r2, 6) if (log_applied or log_target) else 0.0
+
+    if log_target:
+        nl_decision = f"Log-Log selected (dollar R² = {round(result.dollar_r2, 4)})"
+    elif log_applied:
+        nl_decision = f"Linear-Log selected (R² improved by {r2_diff})"
     else:
-        result = check_nonlinearity(result, spend_cols)
-        log_applied = result.log_transform_applied
-        r2_diff = round(result.r2 - pre_r2, 6) if log_applied else 0.0
-        nl_decision = f"Log transform improved R² by {r2_diff}" if log_applied else "Linear model is adequate"
+        nl_decision = "Linear model is adequate"
 
     yield _sse({
         "type": "result",
         "id": "nonlinearity",
         "title": "Nonlinearity Test",
-        "status": "action" if log_applied else "pass",
+        "status": "action" if (log_applied or log_target) else "pass",
         "metrics": {
             "log_transform_applied": log_applied,
+            "log_target_applied": log_target,
+            "dollar_r2": round(result.dollar_r2, 6),
             "r2_improvement": r2_diff,
             "final_r_squared": round(result.r2, 6),
             "final_adjusted_r_squared": round(result.adj_r2, 6),
@@ -717,12 +720,23 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
     if neg:
         result.negative_spend_cols = neg
 
-    use_log_target = config.get("use_log_target", False)
+    use_log_target = getattr(result, "log_target_applied", False)
     smearing_factor = 1.0
     if use_log_target:
+        # Recompute Duan's smearing on post-HAC residuals
         residuals = result.y.values - result.predicted
-        smearing_factor = float(np.mean(np.exp(residuals)))
-        smearing_factor = max(smearing_factor, 1e-6)
+        smearing_factor = max(float(np.mean(np.exp(residuals))), 1e-6)
+        # Recompute dollar_r2 with post-HAC residuals
+        y_original = np.expm1(result.y.values)
+        preds_dollar = np.maximum(smearing_factor * np.exp(result.predicted) - 1.0, 0.0)
+        ss_res = float(np.sum((y_original - preds_dollar) ** 2))
+        ss_tot = float(np.sum((y_original - y_original.mean()) ** 2))
+        result.dollar_r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+        n, p = result.X.shape
+        result.dollar_adj_r2 = 1.0 - (1.0 - result.dollar_r2) * (n - 1) / (n - p - 1) if n > p + 1 else result.dollar_r2
+    else:
+        result.dollar_r2 = result.r2
+        result.dollar_adj_r2 = result.adj_r2
 
     model_config_updates: Dict = {
         "model_type": result.model_type,
@@ -739,6 +753,7 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
     if result.ridge_applied and vif_metrics.get("alpha_comparison"):
         model_config_updates["alpha_comparison"] = vif_metrics["alpha_comparison"]
     model_config.update(model_config_updates)
+    model_config = _sanitize_for_json(model_config)
     config_hash = hashlib.sha256(
         json.dumps(model_config, sort_keys=True).encode()
     ).hexdigest()
