@@ -263,6 +263,7 @@ function RunPageInner() {
     { id: "welcome", role: "assistant", content: WELCOME_CONTENT },
   ]);
   const [chatInput, setChatInput] = useState("");
+  const [streamingMsgId, setStreamingMsgId] = useState<string | null>(null);
 
   const doneRef = useRef(false);
   const diagnosticsSentRef = useRef(false);
@@ -271,10 +272,15 @@ function RunPageInner() {
   const resultsEndRef = useRef<HTMLDivElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
+  const scrollTickRef = useRef<number | null>(null);
   const scrollToBottom = useCallback(() => {
-    reasoningEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    resultsEndRef.current?.scrollIntoView({ behavior: "smooth" });
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (scrollTickRef.current) return;
+    scrollTickRef.current = requestAnimationFrame(() => {
+      chatEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+      reasoningEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+      resultsEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+      scrollTickRef.current = null;
+    });
   }, []);
 
   const addChatMessage = useCallback(
@@ -291,9 +297,13 @@ function RunPageInner() {
     [projectId]
   );
 
+  const lastScrollRef = useRef(0);
   useEffect(() => {
+    const now = Date.now();
+    if (streamingMsgId && now - lastScrollRef.current < 300) return;
+    lastScrollRef.current = now;
     scrollToBottom();
-  }, [reasoning, results, chatMessages, scrollToBottom]);
+  }, [reasoning, results, chatMessages, scrollToBottom, streamingMsgId]);
 
   const runForecast = useCallback(
     (
@@ -593,20 +603,144 @@ function RunPageInner() {
     };
   }, [projectId, addChatMessage]);
 
-  function handleChatSubmit(e: React.FormEvent) {
+  const [chatLoading, setChatLoading] = useState(false);
+
+  async function handleChatSubmit(e: React.FormEvent) {
     e.preventDefault();
     const text = chatInput.trim();
-    if (!text) return;
+    if (!text || !projectId || chatLoading) return;
 
     addChatMessage("user", text);
     setChatInput("");
+    setChatLoading(true);
 
-    setTimeout(() => {
-      addChatMessage(
-        "assistant",
-        "I can currently explain the data diagnostics step — including how your data strength score is calculated, what model mode was selected, and what the gating reasons mean. Full conversational AI is coming soon."
+    const recentHistory = chatMessages
+      .filter((m) => m.id !== "welcome")
+      .slice(-20)
+      .map((m) => ({ role: m.role, content: m.content }));
+
+    const aiMsgId = `assistant-${Date.now()}`;
+    setStreamingMsgId(aiMsgId);
+    setChatMessages((prev) => [...prev, { id: aiMsgId, role: "assistant", content: "" }]);
+
+    try {
+      const res = await fetch(`/api/projects/${projectId}/run/chat/ai`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          message: text,
+          pipelineResults: results.map((r) => ({
+            title: r.title,
+            status: r.status,
+            metrics: r.metrics,
+          })),
+          summary: complete?.summary ?? null,
+          chatHistory: recentHistory,
+        }),
+      });
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => "");
+        let err: { error: string };
+        try {
+          err = JSON.parse(errText);
+        } catch {
+          err = { error: errText || `Request failed (${res.status})` };
+        }
+        setChatMessages((prev) =>
+          prev.map((m) =>
+            m.id === aiMsgId
+              ? { ...m, content: `Sorry, I couldn't process that: ${err.error}` }
+              : m
+          )
+        );
+        setChatLoading(false);
+        setStreamingMsgId(null);
+        return;
+      }
+
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error("No response stream");
+
+      const decoder = new TextDecoder();
+      let fullText = "";
+      let buffer = "";
+      let rafId: number | null = null;
+      let dirty = false;
+
+      const flushToState = () => {
+        rafId = null;
+        if (!dirty) return;
+        dirty = false;
+        const snapshot = fullText;
+        setChatMessages((prev) =>
+          prev.map((m) =>
+            m.id === aiMsgId ? { ...m, content: snapshot } : m
+          )
+        );
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const payload = line.slice(6).trim();
+          if (payload === "[DONE]") continue;
+
+          try {
+            const parsed = JSON.parse(payload);
+            if (parsed.error) {
+              fullText += `\n[Error: ${parsed.error}]`;
+            } else if (parsed.text) {
+              fullText += parsed.text;
+            }
+            dirty = true;
+          } catch {
+            // skip malformed chunks
+          }
+        }
+
+        if (dirty && !rafId) {
+          rafId = requestAnimationFrame(flushToState);
+        }
+      }
+
+      if (rafId) cancelAnimationFrame(rafId);
+      if (dirty) {
+        const snapshot = fullText;
+        setChatMessages((prev) =>
+          prev.map((m) =>
+            m.id === aiMsgId ? { ...m, content: snapshot } : m
+          )
+        );
+      }
+
+      if (fullText) {
+        fetch(`/api/projects/${projectId}/run/chat`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ role: "assistant", content: fullText }),
+        }).catch((err) => console.error("Failed to persist AI response:", err));
+      }
+    } catch (err) {
+      setChatMessages((prev) =>
+        prev.map((m) =>
+          m.id === aiMsgId
+            ? { ...m, content: "Sorry, something went wrong. Please try again." }
+            : m
+        )
       );
-    }, 400);
+      console.error("Chat AI error:", err);
+    } finally {
+      setChatLoading(false);
+      setStreamingMsgId(null);
+    }
   }
 
   if (!projectId) {
@@ -706,7 +840,7 @@ function RunPageInner() {
                           msg.role === "user"
                             ? "bg-cyan-500/20 border border-cyan-500/30 text-white"
                             : "bg-white/5 border border-white/10 text-gray-300"
-                        }`}
+                        }${streamingMsgId === msg.id ? " chat-bubble-streaming" : ""}`}
                       >
                         {msg.content.split("\n").map((line, li) => (
                           <p key={li} className={li > 0 ? "mt-1.5" : ""}>
@@ -742,12 +876,16 @@ function RunPageInner() {
                     />
                     <button
                       type="submit"
-                      disabled={!chatInput.trim()}
+                      disabled={!chatInput.trim() || chatLoading}
                       className="px-4 py-2.5 bg-cyan-500/20 border border-cyan-500/30 rounded-xl text-cyan-400 text-sm font-light hover:bg-cyan-500/30 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
                     >
-                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />
-                      </svg>
+                      {chatLoading ? (
+                        <div className="w-4 h-4 border-2 border-cyan-400/30 border-t-cyan-400 rounded-full animate-spin" />
+                      ) : (
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M6 12L3.269 3.126A59.768 59.768 0 0121.485 12 59.77 59.77 0 013.27 20.876L5.999 12zm0 0h7.5" />
+                        </svg>
+                      )}
                     </button>
                   </div>
                 </form>
