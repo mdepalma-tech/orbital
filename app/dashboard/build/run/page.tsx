@@ -1110,6 +1110,18 @@ function RunPageInner() {
                           </>
                         )}
                       </div>
+                      {Array.isArray(complete.summary.negative_spend_warning) && (complete.summary.negative_spend_warning as string[]).length > 0 && (
+                        <div className="mt-3 rounded bg-red-500/10 border border-red-500/30 px-3 py-2">
+                          <p className="text-red-400 text-[12px] font-medium mb-1">Negative Spend Coefficients</p>
+                          {(complete.summary.negative_spend_warning as string[]).map((col) => (
+                            <div key={col} className="flex items-center gap-1.5 text-[11px]">
+                              <span className="w-1.5 h-1.5 rounded-full bg-red-400 shrink-0" />
+                              <span className="text-red-300 font-mono">{col}</span>
+                            </div>
+                          ))}
+                          <p className="text-[10px] text-red-400/60 mt-1 font-light">Model suggests more spend on these channels decreases revenue. Review data or consider removing.</p>
+                        </div>
+                      )}
                       <div className="mt-4 pt-4 border-t border-white/10">
                         <button
                           onClick={() => router.push("/dashboard")}
@@ -1241,6 +1253,9 @@ function RunPageInner() {
                     ) : (
                     <>
                     {Object.entries(r.metrics).map(([key, value]) => {
+                      if (key === "ridge_applied") return null;
+                      if (key === "alpha_comparison" && !(Array.isArray(value) && value.length > 0)) return null;
+
                       if (key === "top_anomalies" && Array.isArray(value)) {
                         if (value.length === 0) return null;
                         return (
@@ -1282,6 +1297,124 @@ function RunPageInner() {
                           <div key={key} className="mt-1.5 pt-1.5 border-t border-white/5">
                             <p className="text-[12px] font-light opacity-90">
                               {formatMetricValue(value)}
+                            </p>
+                          </div>
+                        );
+                      }
+
+                      if (key === "ridge_alpha" && typeof value === "number") {
+                        return (
+                          <div key={key} className="mt-1.5 pt-1.5 border-t border-white/5">
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-[12px] font-medium text-cyan-300">
+                                Ridge Regularization Active
+                              </span>
+                              <span className="text-[11px] px-2 py-1 rounded bg-cyan-500/20 border border-cyan-500/40 font-mono text-cyan-200">
+                                α = {formatMetricValue(value)}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      }
+
+                      if (key === "negative_spend_warning" && Array.isArray(value) && value.length > 0) {
+                        return (
+                          <div key={key} className="mt-1.5 pt-1.5 border-t border-white/5">
+                            <div className="flex items-start gap-2 rounded bg-red-500/10 border border-red-500/30 px-2.5 py-2">
+                              <span className="text-red-400 text-[12px] font-medium shrink-0">Negative Spend Coefficients</span>
+                            </div>
+                            <div className="mt-1.5 space-y-0.5">
+                              {(value as string[]).map((col) => (
+                                <div key={col} className="flex items-center gap-1.5 text-[11px]">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-red-400 shrink-0" />
+                                  <span className="text-red-300 font-mono">{col}</span>
+                                  <span className="text-gray-500 font-light">— model suggests more spend decreases revenue</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      }
+
+                      if (key === "ridge_coefficients" && typeof value === "object" && value !== null) {
+                        return (
+                          <div key={key} className="mt-1.5">
+                            <span className="text-[11px] text-gray-400 uppercase tracking-wider">
+                              Ridge Coefficients
+                            </span>
+                            <div className="mt-1 space-y-1">
+                              {Object.entries(value as Record<string, number>).map(
+                                ([col, coef]) => (
+                                  <div
+                                    key={col}
+                                    className="flex justify-between text-[12px]"
+                                  >
+                                    <span className="text-gray-400 font-light">
+                                      {formatMetricKey(col)}
+                                    </span>
+                                    <span className={`font-mono ${Number(coef) < 0 ? "text-red-400" : "text-gray-200"}`}>
+                                      {formatMetricValue(coef)}
+                                    </span>
+                                  </div>
+                                )
+                              )}
+                            </div>
+                          </div>
+                        );
+                      }
+
+                      if (key === "vif_note" && typeof value === "string") {
+                        return (
+                          <div key={key} className="mt-1 text-[10px] text-gray-500 font-light italic">
+                            VIF values are {value}
+                          </div>
+                        );
+                      }
+
+                      if (key === "alpha_comparison" && Array.isArray(value) && value.length > 0) {
+                        const rows = value as Array<Record<string, unknown>>;
+                        const spendCols = Object.keys(rows[0]).filter(
+                          (k) => !["objective", "alpha", "r2", "adj_r2", "holdout_mse"].includes(k)
+                        );
+                        return (
+                          <div key={key} className="mt-2 pt-2 border-t border-white/5">
+                            <span className="text-[11px] text-gray-400 uppercase tracking-wider">
+                              Alpha Objectives Comparison
+                            </span>
+                            <div className="mt-2 overflow-x-auto alpha-comparison-scroll">
+                              <table className="w-full text-[11px]">
+                                <thead>
+                                  <tr className="text-left text-gray-400 font-light">
+                                    <th className="pb-1 pr-2">Objective</th>
+                                    <th className="pb-1 pr-2">α</th>
+                                    <th className="pb-1 pr-2">R²</th>
+                                    <th className="pb-1 pr-2">Holdout MSE</th>
+                                    {spendCols.map((c) => (
+                                      <th key={c} className="pb-1 pr-2">{c}</th>
+                                    ))}
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {rows.map((row, ri) => (
+                                    <tr key={ri} className="text-gray-200">
+                                      <td className="py-0.5 pr-2 font-mono">
+                                        {String(row.objective).replace(/_/g, " ")}
+                                      </td>
+                                      <td className="py-0.5 pr-2 font-mono">{formatMetricValue(row.alpha)}</td>
+                                      <td className="py-0.5 pr-2 font-mono">{formatMetricValue(row.r2)}</td>
+                                      <td className="py-0.5 pr-2 font-mono">{formatMetricValue(row.holdout_mse)}</td>
+                                      {spendCols.map((col) => (
+                                        <td key={col} className="py-0.5 pr-2 font-mono">
+                                          {formatMetricValue(row[col])}
+                                        </td>
+                                      ))}
+                                    </tr>
+                                  ))}
+                                </tbody>
+                              </table>
+                            </div>
+                            <p className="mt-1.5 text-[10px] text-gray-500 font-light">
+                              Prediction MSE: optimises holdout error. Attribution stability: optimises coefficient consistency.
                             </p>
                           </div>
                         );

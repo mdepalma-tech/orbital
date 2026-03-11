@@ -16,7 +16,7 @@ from pipeline.validate import validate_and_prepare, EPSILON
 from pipeline.aggregate import apply_event_dummies, aggregate_to_weekly
 from pipeline.diagnostics import run_diagnostics
 from pipeline.matrix import build_design_matrix, get_model_config
-from pipeline.modeling import run_model
+from pipeline.modeling import compare_alpha_objectives, run_model
 from pipeline.counterfactual import compute_counterfactual
 from pipeline.anomalies import detect_anomalies
 from pipeline.confidence import compute_confidence
@@ -564,17 +564,26 @@ def run_pipeline(project_id: str):
         smearing_factor = float(np.mean(np.exp(residuals)))
         smearing_factor = max(smearing_factor, 1e-6)
 
-    model_config.update({
+    model_config_updates = {
         "model_type": result.model_type,
         "ridge_applied": result.ridge_applied,
-        "ridge_alpha": 1.0 if result.ridge_applied else None,
+        "ridge_alpha": result.ridge_alpha if result.ridge_applied else None,
         "lags_added": result.lags_added,
         "hac_applied": result.hac_applied,
         "log_transform_post_fit": result.log_transform_applied,
         "feature_names": list(result.X.columns),
         "use_log_target": use_log_target,
         "smearing_factor": smearing_factor,
-    })
+    }
+    if result.ridge_applied:
+        try:
+            alpha_comp_df = compare_alpha_objectives(result.X, result.y, spend_cols)
+            model_config_updates["alpha_comparison"] = (
+                alpha_comp_df.replace({np.nan: None}).to_dict(orient="records")
+            )
+        except Exception:
+            model_config_updates["alpha_comparison"] = []
+    model_config.update(model_config_updates)
     config_hash = hashlib.sha256(
         json.dumps(model_config, sort_keys=True).encode()
     ).hexdigest()

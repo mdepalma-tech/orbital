@@ -42,21 +42,26 @@ export function SceneController({
         maxPolarAngle={Math.PI}
       />
 
-      <ambientLight intensity={0.15} />
+      <ambientLight intensity={0.08} />
       <hemisphereLight
-        color="#818cf8"
+        color="#6366f1"
         groundColor="#0B0F14"
-        intensity={0.2}
+        intensity={0.18}
       />
       <directionalLight
         position={[5, 8, 6]}
-        intensity={0.4}
+        intensity={0.55}
         color="#c4b5fd"
       />
       <directionalLight
-        position={[-3, -2, -4]}
-        intensity={0.1}
+        position={[-4, -3, -5]}
+        intensity={0.12}
         color="#60a5fa"
+      />
+      <directionalLight
+        position={[0, -6, 3]}
+        intensity={0.08}
+        color="#818cf8"
       />
       <fog attach="fog" args={["#0B0F14", 14, 35]} />
 

@@ -165,10 +165,10 @@ export function OrbitalNode({
         distanceFactor={12}
         style={{ pointerEvents: "none", userSelect: "none" }}
       >
-        <div style={{ transform: "translateY(-24px)" }} className="flex flex-col items-center">
-          <div className="text-[11px] font-light tracking-wider text-white/60 px-1.5 py-0.5 rounded bg-black/40 backdrop-blur-sm whitespace-nowrap">
+        <div style={{ transform: "translateY(-22px)" }} className="flex flex-col items-center">
+          <p className="text-[9px] font-light tracking-[0.18em] text-white/45 whitespace-nowrap uppercase">
             {variable.label}
-          </div>
+          </p>
         </div>
       </Html>
     </mesh>
