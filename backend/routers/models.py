@@ -599,6 +599,7 @@ def run_pipeline(project_id: str):
         spend_cols,
         use_log_target=use_log_target,
         smearing_factor=smearing_factor,
+        df_weekly=df_weekly,
     )
 
     # Step 11 — Anomalies
