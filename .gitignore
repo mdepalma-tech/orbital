@@ -58,7 +58,7 @@ ENV/
 
 # Python build artifacts
 dist/
-build/
+backend/build/
 *.egg-info/
 
 # Pytest
@@ -77,6 +77,9 @@ htmlcov/
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Pipeline tree cache
+.tree_cache.json
 
 # OS generated
 Thumbs.db

@@ -2,26 +2,30 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
+import logging
 import uuid
 from typing import Dict, List
+
+logger = logging.getLogger(__name__)
 
 import numpy as np
 from services.supabase_client import get_supabase
 from pipeline.modeling import ModelResult
 
 
-def _config_hash(result: ModelResult) -> str:
-    config = {
-        "target": "revenue",
-        "lags_added": result.lags_added,
-        "ridge_applied": result.ridge_applied,
-        "log_transform": result.log_transform_applied,
-        "hac_applied": result.hac_applied,
-    }
-    raw = json.dumps(config, sort_keys=True)
-    return hashlib.sha256(raw.encode()).hexdigest()[:16]
+def _to_native(val):
+    """Coerce numpy types to native Python for JSONB compatibility.
+    Also replaces inf/NaN with None so json.dumps never blows up."""
+    if hasattr(val, "item"):
+        val = val.item()
+    if isinstance(val, float) and (np.isnan(val) or np.isinf(val)):
+        return None
+    if isinstance(val, dict):
+        return {k: _to_native(v) for k, v in val.items()}
+    if isinstance(val, (list, tuple)):
+        return [_to_native(v) for v in val]
+    return val
 
 
 def _correlation_matrix(X, spend_cols: list[str]) -> dict:
@@ -45,9 +49,13 @@ def persist_results(
     confidence_level: str,
     n_obs: int,
     diagnostics: Dict | None = None,
+    model_config: Dict | None = None,
+    config_hash: str | None = None,
+    oos_metrics: Dict | None = None,
+    feature_state: Dict | None = None,
 ) -> str:
+    logger.info("persist_results called for project_id=%s", project_id)
     sb = get_supabase()
-    config_hash = _config_hash(result)
 
     # ── models ───────────────────────────────────────────────────────────
     existing = (
@@ -83,17 +91,44 @@ def persist_results(
         "r2": round(result.r2, 6),
         "adjusted_r2": round(result.adj_r2, 6),
         "confidence_level": confidence_level,
-        "config_hash": config_hash,
     }
+    if config_hash is not None:
+        version_row["config_hash"] = config_hash
+    if model_config is not None:
+        version_row["model_config"] = json.dumps(_to_native(model_config))
+    if feature_state is not None:
+        version_row["feature_state"] = _to_native(feature_state)
 
     if diagnostics:
         version_row["data_strength_score"] = diagnostics["score"]
         version_row["model_mode"] = diagnostics["model_mode"]
         version_row["confidence_band"] = diagnostics["data_confidence_band"]
-        version_row["diagnostics_snapshot"] = json.dumps(diagnostics["snapshot"])
-        version_row["gating_reasons"] = json.dumps(diagnostics["gating_reasons"])
+        version_row["diagnostics_snapshot"] = json.dumps(_to_native(diagnostics["snapshot"]))
+        version_row["gating_reasons"] = json.dumps(_to_native(diagnostics["gating_reasons"]))
 
-    sb.table("model_versions").insert(version_row).execute()
+    if oos_metrics is not None:
+        # Coerce to native Python types for JSON/PostgREST compatibility
+        oos_n = oos_metrics.get("oos_n_obs")
+        version_row["oos_n_obs"] = int(oos_n) if oos_n is not None else None
+        oos_r2 = oos_metrics.get("oos_r2")
+        version_row["oos_r2"] = round(float(oos_r2), 6) if oos_r2 is not None else None
+        oos_rmse = oos_metrics.get("oos_rmse")
+        version_row["oos_rmse"] = round(float(oos_rmse), 6) if oos_rmse is not None else None
+        oos_mae = oos_metrics.get("oos_mae")
+        version_row["oos_mae"] = round(float(oos_mae), 6) if oos_mae is not None else None
+        oos_ratio = oos_metrics.get("oos_split_ratio")
+        version_row["oos_split_ratio"] = float(oos_ratio) if oos_ratio is not None else None
+        oos_mode = oos_metrics.get("oos_model_mode")
+        version_row["oos_model_mode"] = str(oos_mode) if oos_mode is not None else None
+        logger.info(
+            "Persisting OOS metrics: oos_n_obs=%s oos_r2=%s oos_rmse=%s oos_mae=%s",
+            version_row.get("oos_n_obs"),
+            version_row.get("oos_r2"),
+            version_row.get("oos_rmse"),
+            version_row.get("oos_mae"),
+        )
+
+    sb.table("model_versions").insert(_to_native(version_row)).execute()
 
     # ── model_coefficients ───────────────────────────────────────────────
     coeff_rows = []
@@ -124,15 +159,15 @@ def persist_results(
     corr_matrix = _correlation_matrix(result.X, spend_cols)
 
     sb.table("model_diagnostics").insert(
-        {
+        _to_native({
             "model_version_id": version_id,
             "max_vif": max_vif,
             "ljung_box_p": round(result.ljung_box_p, 8),
             "breusch_pagan_p": round(result.breusch_pagan_p, 8),
             "durbin_watson": round(result.dw_stat, 6),
             "residual_std": round(result.residual_std, 6),
-            "correlation_matrix": json.dumps(corr_matrix),
-        }
+            "correlation_matrix": json.dumps(_to_native(corr_matrix)),
+        })
     ).execute()
 
     # ── model_anomalies ──────────────────────────────────────────────────

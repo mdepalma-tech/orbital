@@ -16,16 +16,32 @@ def _predict(result: ModelResult, X: pd.DataFrame) -> np.ndarray:
     return result.model.predict(X).values
 
 
+def _to_revenue(pred_log: np.ndarray, smearing: float) -> np.ndarray:
+    """Inverse log-target transform with smearing: revenue = smearing * exp(pred) - 1."""
+    return np.maximum(smearing * np.exp(pred_log) - 1.0, 0.0)
+
+
 def compute_counterfactual(
-    result: ModelResult, spend_cols: list[str]
+    result: ModelResult,
+    spend_cols: list[str],
+    use_log_target: bool = False,
+    smearing_factor: float = 1.0,
 ) -> tuple[Dict[str, float], Dict[str, float]]:
     """
     For each spend channel, zero it out and compute:
-      incremental = sum(actual_pred - counterfactual_pred)
+      incremental = sum(actual_rev - counterfactual_rev)
       marginal_roi = incremental / total_spend
+
+    When use_log_target is True, predictions are in log space (semi-elasticities).
+    We inverse-transform to revenue space before summing so incremental and ROI
+    are interpretable as dollars and dollars-per-dollar.
     """
     actual_pred = result.predicted
-    actual_total = float(np.sum(actual_pred))
+    if use_log_target:
+        actual_rev = _to_revenue(actual_pred, smearing_factor)
+        actual_total = float(np.sum(actual_rev))
+    else:
+        actual_total = float(np.sum(actual_pred))
 
     incremental: Dict[str, float] = {}
     marginal_roi: Dict[str, float] = {}
@@ -38,7 +54,12 @@ def compute_counterfactual(
         X_cf[col] = 0.0
         cf_pred = _predict(result, X_cf)
 
-        inc = float(actual_total - np.sum(cf_pred))
+        if use_log_target:
+            cf_rev = _to_revenue(cf_pred, smearing_factor)
+            inc = float(actual_total - np.sum(cf_rev))
+        else:
+            inc = float(actual_total - np.sum(cf_pred))
+
         total_spend = float(result.X[col].sum())
 
         incremental[col] = round(inc, 2)

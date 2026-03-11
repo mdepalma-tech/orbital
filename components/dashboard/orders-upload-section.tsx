@@ -21,13 +21,17 @@ interface ApiResponse {
 
 type Stage = "upload" | "parsing" | "preview" | "saving" | "saved" | "error";
 
-export function OrdersUploadSection({ projectId }: { projectId: string }) {
+interface OrdersUploadSectionProps {
+  projectId: string;
+  projectName?: string;
+}
+
+export function OrdersUploadSection({ projectId, projectName = "Untitled Analysis" }: OrdersUploadSectionProps) {
   const [stage, setStage] = useState<Stage>("upload");
   const [summary, setSummary] = useState<ParseSummary | null>(null);
   const [warnings, setWarnings] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [timezone, setTimezone] = useState("America/New_York");
   const formRef = useRef<HTMLFormElement>(null);
 
   async function handleParse(e: React.FormEvent<HTMLFormElement>) {
@@ -39,6 +43,7 @@ export function OrdersUploadSection({ projectId }: { projectId: string }) {
 
     const formData = new FormData(e.currentTarget);
     formData.set("mode", "preview");
+    formData.set("projectName", projectName);
 
     try {
       const response = await fetch(
@@ -67,8 +72,8 @@ export function OrdersUploadSection({ projectId }: { projectId: string }) {
 
     const formData = new FormData();
     formData.set("file", selectedFile);
-    formData.set("timezone", timezone);
     formData.set("mode", "save");
+    formData.set("projectName", projectName);
 
     try {
       const response = await fetch(
@@ -135,35 +140,6 @@ export function OrdersUploadSection({ projectId }: { projectId: string }) {
             <p className="mt-2 text-xs text-gray-500 font-light">
               Export your orders from Shopify Admin → Orders → Export
             </p>
-          </label>
-        </div>
-
-        {/* Timezone Selector */}
-        <div>
-          <label className="block mb-2">
-            <span className="text-sm text-gray-400 font-light">
-              Store Timezone
-            </span>
-            <select
-              name="timezone"
-              value={timezone}
-              onChange={(e) => setTimezone(e.target.value)}
-              disabled={stage === "parsing" || stage === "saving"}
-              className="mt-2 w-full px-4 py-3 bg-black/40 border border-white/10 rounded-lg text-white focus:border-blue-500/50 focus:outline-none font-light disabled:opacity-50"
-            >
-              <option value="UTC">UTC</option>
-              <option value="America/New_York">Eastern Time (ET)</option>
-              <option value="America/Chicago">Central Time (CT)</option>
-              <option value="America/Denver">Mountain Time (MT)</option>
-              <option value="America/Los_Angeles">Pacific Time (PT)</option>
-              <option value="America/Phoenix">Arizona (MST)</option>
-              <option value="America/Anchorage">Alaska (AKT)</option>
-              <option value="Pacific/Honolulu">Hawaii (HST)</option>
-              <option value="Europe/London">London (GMT)</option>
-              <option value="Europe/Paris">Paris (CET)</option>
-              <option value="Asia/Tokyo">Tokyo (JST)</option>
-              <option value="Australia/Sydney">Sydney (AEST)</option>
-            </select>
           </label>
         </div>
 

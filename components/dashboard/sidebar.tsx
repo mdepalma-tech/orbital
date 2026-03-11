@@ -1,8 +1,10 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { LogoutButton } from "@/components/logout-button";
+import { randomUUID } from "@/lib/utils";
 
 const navigation = [
   { name: "Dashboard", href: "/dashboard", icon: "📊" },
@@ -15,6 +17,14 @@ const navigation = [
 
 export function DashboardSidebar() {
   const pathname = usePathname();
+  const [hasAnalyses, setHasAnalyses] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/analyses")
+      .then((r) => r.json())
+      .then((data) => setHasAnalyses((data?.analyses?.length ?? 0) > 0))
+      .catch(() => {});
+  }, []);
 
   return (
     <aside className="w-64 bg-black/40 border-r border-white/10 flex flex-col backdrop-blur-sm">
@@ -25,6 +35,19 @@ export function DashboardSidebar() {
           <span className="text-xl font-light tracking-wider">ORBITAL</span>
         </Link>
       </div>
+
+      {/* Build new model - top when user has analyses */}
+      {hasAnalyses && (
+        <div className="p-4 border-b border-white/10">
+          <Link
+            href={`/dashboard/build?projectId=${randomUUID()}`}
+            className="flex items-center gap-3 px-4 py-3 rounded-lg font-light bg-gradient-to-r from-blue-500/20 to-violet-500/20 border border-blue-500/30 text-white hover:from-blue-500/30 hover:to-violet-500/30 transition-all"
+          >
+            <span className="text-xl">➕</span>
+            <span>Build New Model</span>
+          </Link>
+        </div>
+      )}
 
       {/* Navigation */}
       <nav className="flex-1 p-4 space-y-1">

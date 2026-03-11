@@ -98,13 +98,12 @@ export function HeroSection() {
       {/* Bottom: Description + CTAs */}
       <div className="text-center max-w-3xl relative z-10">
         <p className="text-lg md:text-xl text-gray-400 mb-4 font-light leading-relaxed">
-          Orbital models the forces driving your growth — quantifying
-          incremental impact across revenue, traffic, and conversion using
-          structured statistical modeling.
+          From what&apos;s driving today&apos;s demand to what each customer is worth over time,
+          Orbital models your full business system — so every decision starts with truth, not platform noise.
         </p>
 
         <p className="text-base text-gray-500 mb-8 font-light tracking-wide">
-          Clear answers. No platform bias. No black box.
+          No platform bias. No guesswork. No black box.
         </p>
 
         <div className="flex flex-col sm:flex-row gap-3 justify-center">
@@ -115,10 +114,10 @@ export function HeroSection() {
             Join Waitlist
           </a>
           <a
-            href="#waitlist"
+            href="#how-it-works"
             className="px-8 py-4 border border-white/15 rounded-lg font-light tracking-wide hover:bg-white/5 transition-all duration-300 text-base text-gray-300"
           >
-            Learn More
+            How It Works
           </a>
         </div>
       </div>
