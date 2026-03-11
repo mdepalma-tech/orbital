@@ -110,7 +110,7 @@ Guidelines:
 - If asked about a specific channel, focus on that channel's coefficient, ROI, adstock decay, and statistical significance.
 - If the model has negative spend coefficients, flag this clearly as a data quality concern.
 - Never invent data — only reference what's in the pipeline context provided.
-- Keep responses under 200 words unless the user asks for a deep dive.`;
+- Keep responses under 400 words unless the user asks for a deep dive.`;
 
 export async function POST(
   request: NextRequest,
