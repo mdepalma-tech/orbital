@@ -9,25 +9,31 @@ def compute_confidence(
     result: ModelResult,
     n_obs: int,
     oos_metrics: dict | None = None,
+    n_obs_effective: int | None = None,
 ) -> str:
     """
     Returns 'high', 'medium', or 'low' based on deterministic rules.
     OOS metrics can only downgrade, never upgrade.
+
+    n_obs: original weekly count (e.g. from aggregation)
+    n_obs_effective: rows after lag drops in check_autocorrelation; if provided,
+        used for data volume checks (60-90 range, < 90 + low r2). Defaults to n_obs.
     """
     base_confidence = "high"
+    n_for_volume = n_obs if n_obs_effective is None else n_obs_effective
 
     # Downgrade to medium
     if result.r2 < 0.3:
         base_confidence = "medium"
     if result.vif_values and max(result.vif_values.values()) > 10:
         base_confidence = "medium"
-    if 60 <= n_obs <= 90:
+    if 60 <= n_for_volume <= 90:
         base_confidence = "medium"
 
     # Downgrade to low
     if result.r2 < 0.15:
         base_confidence = "low"
-    if n_obs < 90 and result.r2 < 0.3:
+    if n_for_volume < 90 and result.r2 < 0.3:
         base_confidence = "low"
 
     # Check spend variation via VIF as proxy for low variation

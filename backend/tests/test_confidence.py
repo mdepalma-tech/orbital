@@ -126,3 +126,14 @@ def test_confidence_oos_mild_degradation_small_window():
     result = _make_result(r2=0.8, vif_values={"spend": 2.0})
     oos = {"oos_n_obs": 10, "oos_r2": -0.6}
     assert compute_confidence(result, n_obs=120, oos_metrics=oos) == "medium"
+
+
+@pytest.mark.pure
+def test_confidence_uses_n_obs_effective_for_volume_checks():
+    """When n_obs_effective < 90 and r2 < 0.3, use effective count => 'low'.
+    Original n_obs=93 would not trigger < 90, but n_obs_effective=51 (after lag drops) does."""
+    result = _make_result(r2=0.25, vif_values={"spend": 2.0})
+    # Without n_obs_effective: n_obs=93 -> medium (r2 < 0.3, but n >= 90)
+    assert compute_confidence(result, n_obs=93) == "medium"
+    # With n_obs_effective=51: effective 51 < 90 and r2 < 0.3 -> low
+    assert compute_confidence(result, n_obs=93, n_obs_effective=51) == "low"

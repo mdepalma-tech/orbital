@@ -780,7 +780,11 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
         ),
     })
 
-    confidence = compute_confidence(result, n_obs, oos_metrics=oos_metrics)
+    # Use effective row count for data volume checks (after lag drops in check_autocorrelation)
+    n_obs_effective = int(result.X.shape[0])
+    confidence = compute_confidence(
+        result, n_obs, oos_metrics=oos_metrics, n_obs_effective=n_obs_effective
+    )
 
     yield _sse({
         "type": "result",
@@ -790,7 +794,7 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
         "metrics": {
             "confidence_level": confidence,
             "r_squared": round(result.r2, 6),
-            "observations": n_obs,
+            "observations": n_obs_effective,
             "model_type": result.model_type,
         },
     })

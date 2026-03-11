@@ -315,11 +315,11 @@ def _define_modeling_steps() -> List[PipelineNode]:
             description="Rule-based confidence scoring; OOS metrics can only downgrade, never upgrade",
             module_path="pipeline/confidence.py",
             function_name="compute_confidence",
-            inputs=["result", "n_obs", "oos_metrics"],
+            inputs=["result", "n_obs", "oos_metrics", "n_obs_effective (optional)"],
             outputs=["confidence_level ('high' | 'medium' | 'low')"],
             parameters={
                 "r2_thresholds": "< 0.15 -> low, < 0.3 -> medium",
-                "obs_thresholds": "60-90 -> medium, < 90 and r2 < 0.3 -> low",
+                "obs_thresholds": "60-90 -> medium, < 90 and r2 < 0.3 -> low (uses n_obs_effective when provided)",
                 "vif_gate": "min_vif < 1.01 -> low",
                 "oos_gates": "r2 < -0.5 (16+ obs) -> low, r2 < 0 (16+ obs) -> downgrade one level",
             },
