@@ -781,6 +781,7 @@ def stream_pipeline(project_id: str) -> Generator[str, None, None]:
         spend_cols,
         use_log_target=use_log_target,
         smearing_factor=smearing_factor,
+        df_weekly=df_weekly,
     )
 
     yield _sse({

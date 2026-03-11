@@ -26,11 +26,16 @@ def compute_counterfactual(
     spend_cols: list[str],
     use_log_target: bool = False,
     smearing_factor: float = 1.0,
+    df_weekly: pd.DataFrame | None = None,
 ) -> tuple[Dict[str, float], Dict[str, float]]:
     """
     For each spend channel, zero it out and compute:
       incremental = sum(actual_rev - counterfactual_rev)
       marginal_roi = incremental / total_spend
+
+    total_spend uses raw (pre-adstock) spend from df_weekly when provided,
+    so ROI is dollars per actual dollar spent. Otherwise falls back to
+    result.X[col].sum() (adstocked spend), which understates ROI for high-alpha channels.
 
     When use_log_target is True, predictions are in log space (semi-elasticities).
     We inverse-transform to revenue space before summing so incremental and ROI
@@ -48,6 +53,8 @@ def compute_counterfactual(
 
     for col in spend_cols:
         if col not in result.X.columns:
+            incremental[col] = 0.0
+            marginal_roi[col] = 0.0
             continue
 
         X_cf = result.X.copy()
@@ -60,7 +67,11 @@ def compute_counterfactual(
         else:
             inc = float(actual_total - np.sum(cf_pred))
 
-        total_spend = float(result.X[col].sum())
+        # Use raw spend for ROI denominator when available (avoids adstock inflation)
+        if df_weekly is not None and col in df_weekly.columns:
+            total_spend = float(df_weekly[col].astype(float).sum())
+        else:
+            total_spend = float(result.X[col].sum())
 
         incremental[col] = round(inc, 2)
         marginal_roi[col] = round(inc / total_spend, 4) if total_spend > 0 else 0.0
