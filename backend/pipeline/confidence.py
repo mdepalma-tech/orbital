@@ -9,13 +9,19 @@ def compute_confidence(
     result: ModelResult,
     n_obs: int,
     oos_metrics: dict | None = None,
+    n_obs_effective: int | None = None,
 ) -> str:
     """
     Returns 'high', 'medium', or 'low' based on deterministic rules.
     OOS metrics can only downgrade, never upgrade.
+
+    n_obs: original weekly count (e.g. from aggregation)
+    n_obs_effective: rows after lag drops in check_autocorrelation; if provided,
+        used for data volume checks (60-90 range, < 90 + low r2). Defaults to n_obs.
     """
     # Start at High (3), downgrade progressively based on failures
-    confidence_level = 3  
+    confidence_level = 3
+    n_for_volume = n_obs if n_obs_effective is None else n_obs_effective
 
     # --- 1. Goodness of Fit (Adjusted R-squared in dollar space) ---
     # Use dollar_adj_r2 so log-target models are evaluated fairly.
@@ -26,11 +32,11 @@ def compute_confidence(
         confidence_level = min(confidence_level, 2)
 
     # --- 2. Data Volume ---
-    # Assuming weekly data: < 52 weeks (1 yr) is highly unstable.
-    # If using daily data, you may want to bump these to 180 and 365.
-    if n_obs < 52:  
+    # Use effective row count (post lag-drops) so e.g. 53 weeks − 2 lags = 51 rows
+    # correctly triggers the < 52 low-confidence rule.
+    if n_for_volume < 52:
         confidence_level = min(confidence_level, 1)
-    elif n_obs < 104: 
+    elif n_for_volume < 104:
         confidence_level = min(confidence_level, 2)
 
     # --- 3. Collinearity (VIF) ---

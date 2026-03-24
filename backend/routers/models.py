@@ -617,8 +617,11 @@ def run_pipeline(project_id: str):
         "oos_model_mode": model_mode_train,
     }
 
-    # Step 12 — Confidence
-    confidence = compute_confidence(result, n_obs, oos_metrics=oos_metrics)
+    # Step 12 — Confidence (use effective row count after lag drops for data volume checks)
+    n_obs_effective = int(result.X.shape[0])
+    confidence = compute_confidence(
+        result, n_obs, oos_metrics=oos_metrics, n_obs_effective=n_obs_effective
+    )
 
     # For lag models: persist last N actuals for recursive forecast
     feature_state_to_persist = dict(feature_state) if feature_state else {}
