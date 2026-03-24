@@ -294,7 +294,7 @@ def _define_modeling_steps() -> List[PipelineNode]:
             description="Zeros out each spend channel individually; measures incremental revenue and marginal ROI",
             module_path="pipeline/counterfactual.py",
             function_name="compute_counterfactual",
-            inputs=["result", "spend_cols", "use_log_target", "smearing_factor"],
+            inputs=["result", "spend_cols", "use_log_target", "smearing_factor", "df_weekly"],
             outputs=["incremental (Dict[channel, $])", "marginal_roi (Dict[channel, $/$ spent])"],
         ),
         PipelineNode(

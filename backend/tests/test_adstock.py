@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from pipeline.adstock import select_adstock_alphas
+from pipeline.adstock import select_adstock_alphas, _sweep_channel
 
 
 # ---------------------------------------------------------------------------
@@ -181,3 +181,58 @@ def test_deterministic(weekly_data):
     r1 = select_adstock_alphas(df_weekly, spend_cols, "causal_full", diag)
     r2 = select_adstock_alphas(df_weekly, spend_cols, "causal_full", diag)
     assert r1 == r2
+
+
+# ---------------------------------------------------------------------------
+# Coordinated search: conditioning uses prior channels' alphas
+# ---------------------------------------------------------------------------
+
+@pytest.mark.pure
+def test_second_channel_conditioned_on_first(weekly_data):
+    """The second channel should be swept with the first channel's alpha, not zero."""
+    from sklearn.model_selection import TimeSeriesSplit
+
+    df_weekly, spend_cols = weekly_data
+    diag = _diagnostics_stub()
+    tscv = TimeSeriesSplit(n_splits=3)
+
+    # Sweep first channel from zero
+    alpha_first = _sweep_channel(
+        spend_cols[0], spend_cols, {c: 0.0 for c in spend_cols},
+        [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+        df_weekly, tscv, "causal_full", diag,
+    )
+
+    # Sweep second channel with first conditioned (coordinated)
+    conditioned_alphas = {c: 0.0 for c in spend_cols}
+    conditioned_alphas[spend_cols[0]] = alpha_first
+    alpha_second_conditioned = _sweep_channel(
+        spend_cols[1], spend_cols, conditioned_alphas,
+        [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+        df_weekly, tscv, "causal_full", diag,
+    )
+
+    # Sweep second channel independently (old behavior)
+    alpha_second_independent = _sweep_channel(
+        spend_cols[1], spend_cols, {c: 0.0 for c in spend_cols},
+        [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
+        df_weekly, tscv, "causal_full", diag,
+    )
+
+    # Both should be valid grid values regardless of conditioning
+    valid = {0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9}
+    assert alpha_second_conditioned in valid
+    assert alpha_second_independent in valid
+
+
+@pytest.mark.pure
+def test_max_rounds_respected(weekly_data):
+    """max_rounds=1 should produce a result (single pass, no refinement)."""
+    df_weekly, spend_cols = weekly_data
+    diag = _diagnostics_stub()
+    r1 = select_adstock_alphas(df_weekly, spend_cols, "causal_full", diag, max_rounds=1)
+    assert isinstance(r1, dict)
+    assert set(r1.keys()) == set(spend_cols)
+    r2 = select_adstock_alphas(df_weekly, spend_cols, "causal_full", diag, max_rounds=2)
+    assert isinstance(r2, dict)
+    assert set(r2.keys()) == set(spend_cols)

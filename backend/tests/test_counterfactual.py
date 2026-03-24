@@ -121,3 +121,55 @@ def test_compute_counterfactual_with_log_target():
     )
     # With log target, incremental should still be positive (spend has positive effect)
     assert incremental["spend_a"] > 0
+
+
+@pytest.mark.pure
+def test_compute_counterfactual_roi_uses_raw_spend_when_df_weekly_provided():
+    """When df_weekly is provided, ROI denominator should use raw spend, not adstocked spend."""
+    from pipeline.matrix import build_design_matrix, geometric_adstock
+
+    np.random.seed(42)
+    n = 52
+    raw_meta = np.random.uniform(100, 500, n)
+    raw_google = np.random.uniform(50, 200, n)
+    # Adstock inflates the sum: adstocked sum > raw sum for alpha > 0
+    adstock_meta, _ = geometric_adstock(pd.Series(raw_meta), alpha=0.6)
+    adstock_google, _ = geometric_adstock(pd.Series(raw_google), alpha=0.3)
+    revenue = 1000 + 2.0 * adstock_meta.values + 1.5 * adstock_google.values + np.random.normal(0, 30, n)
+
+    df_weekly = pd.DataFrame({
+        "week_index": np.arange(n),
+        "revenue": revenue,
+        "meta_spend": raw_meta,
+        "google_spend": raw_google,
+    })
+    spend_cols = ["meta_spend", "google_spend"]
+    diagnostics = {"seasonality": {"best_k": 0, "dominant_period": 52}}
+    channel_alphas = {"meta_spend": 0.6, "google_spend": 0.3}
+
+    X, y, _ = build_design_matrix(
+        df_weekly, spend_cols, model_mode="causal_full",
+        diagnostics=diagnostics, channel_alphas=channel_alphas,
+    )
+    result = fit_ols(X, y)
+
+    # With df_weekly: ROI uses raw spend (correct)
+    inc_with_raw, roi_with_raw = compute_counterfactual(
+        result, spend_cols, df_weekly=df_weekly
+    )
+    # Without df_weekly: ROI uses adstocked spend (fallback)
+    inc_without, roi_without = compute_counterfactual(result, spend_cols)
+
+    for col in spend_cols:
+        raw_spend = float(df_weekly[col].sum())
+        adstock_spend = float(result.X[col].sum())
+        assert adstock_spend > raw_spend, f"Adstock should inflate sum for {col}"
+        expected_roi_raw = round(inc_with_raw[col] / raw_spend, 4)
+        assert roi_with_raw[col] == expected_roi_raw, (
+            f"ROI should use raw spend when df_weekly provided: got {roi_with_raw[col]}, expected {expected_roi_raw}"
+        )
+        expected_roi_adstock = round(inc_without[col] / adstock_spend, 4)
+        assert roi_without[col] == expected_roi_adstock
+        assert roi_with_raw[col] > roi_without[col], (
+            "ROI with raw denominator should exceed ROI with adstocked denominator"
+        )

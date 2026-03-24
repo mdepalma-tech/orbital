@@ -283,6 +283,27 @@
     background: rgba(59, 130, 246, 0.5);
   }
 
+  /* Smooth streaming text — prevents layout jank during AI typing */
+  .chat-bubble-streaming {
+    transition: height 150ms ease-out;
+    will-change: height;
+  }
+
+  .chat-bubble-streaming p {
+    animation: token-fade-in 200ms ease-out both;
+  }
+
+  @keyframes token-fade-in {
+    from {
+      opacity: 0.4;
+      transform: translateY(2px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
   /* Alpha comparison scrollbar — matches VIF/action card (amber-500) */
   .alpha-comparison-scroll::-webkit-scrollbar {
     height: 6px;
