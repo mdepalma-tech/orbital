@@ -16,8 +16,8 @@ def test_get_model_config_causal_full():
     config = get_model_config("causal_full")
     assert config["use_adstock"] is True
     assert "adstock_alpha" not in config  # per-channel alphas selected externally
-    assert config["use_log"] is True
-    assert config["use_log_target"] is True
+    assert config["use_log"] is False
+    assert config["use_log_target"] is False
 
 
 @pytest.mark.pure
@@ -25,8 +25,8 @@ def test_get_model_config_causal_cautious():
     config = get_model_config("causal_cautious")
     assert config["use_adstock"] is True
     assert "adstock_alpha" not in config
-    assert config["use_log"] is True
-    assert config["use_log_target"] is True
+    assert config["use_log"] is False
+    assert config["use_log_target"] is False
 
 
 @pytest.mark.pure
@@ -123,11 +123,11 @@ def test_build_design_matrix_no_nan(weekly_data):
 
 
 @pytest.mark.pure
-def test_build_design_matrix_log_target_applied(weekly_data):
-    """With causal_full, y should equal log1p(revenue)."""
+def test_build_design_matrix_raw_target_for_causal_full(weekly_data):
+    """With causal_full (use_log_target=False), y should equal raw revenue."""
     df_weekly, spend_cols = weekly_data
     X, y, fs = build_design_matrix(df_weekly, spend_cols, model_mode="causal_full")
-    expected_y = np.log1p(np.maximum(df_weekly["revenue"].astype(float), 0.0))
+    expected_y = df_weekly["revenue"].astype(float)
     np.testing.assert_array_almost_equal(y.values, expected_y.values)
 
 
